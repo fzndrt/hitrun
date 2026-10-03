@@ -37,9 +37,10 @@ from typing import Dict, List, Optional, Tuple, Set
 
 @dataclass
 class Config:
-    # --- Jendela observasi & rescan (DIPERPANJANG) ---
+        # --- Jendela observasi & rescan (DIPERPANJANG) ---
     observation_window_sec: int = 25
     min_age_sec: int = 3
+    enable_rescan: bool = True              # ← TAMBAHKAN INI
     rescan_delay_sec: int = 30              # dari 60 → 30
     max_rescan_count: int = 20              # dari 5 → 20
     max_rescan_age_sec: int = 21600         # 15 menit → 6 JAM
