@@ -597,7 +597,7 @@ class RpcClient:
         self.cache.set(f"auth:{mint}", result)
         return result
 
-    async def _get_account_info_authority(
+        async def _get_account_info_authority(
         self, mint: str, program_id: str
     ) -> Optional[Tuple[bool, bool]]:
         """
