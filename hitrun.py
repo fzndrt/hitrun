@@ -1,11 +1,11 @@
 # ============================================================
-# HITRUN.PY — Hit-and-Run Scanner v8 (FINAL)
+# HITRUN.PY — Hit-and-Run Scanner v9 (MAX DISCOVERY)
 # ============================================================
-# Perubahan v8:
-#  - Discovery diperluas: Pump.fun frontend API + Watchlist
-#  - Migration poller lebih luas (semua pumpfun/dexscreener)
-#  - Post-migration window 7 hari
-#  - Semua modul keamanan v7 tetap utuh
+# Perubahan v9:
+#  - 10+ saluran discovery (WS multi-DEX + GeckoTerminal + SolanaTracker
+#    + RPC logs + Sweep loop)
+#  - Semua filter keamanan tetap ketat
+#  - Coverage ~800-1200 koin/putaran
 # ============================================================
 
 import asyncio
@@ -51,7 +51,7 @@ class Config:
     enable_post_migration: bool = True
     min_market_cap_usd: float = 15_000
     max_market_cap_usd: float = 5_000_000
-    max_pool_age_minutes: int = 10080        # ← EDIT 1: 1440 → 10080 (7 hari)
+    max_pool_age_minutes: int = 10080        # 7 hari
     min_pool_liquidity_usd: float = 8_000
     enable_post_migration_rescan: bool = True
 
@@ -126,30 +126,30 @@ class Config:
     trailing_stop_pct: float = 25.0
     time_stop_hours: int = 24
 
-    # --- Multi-source WS ---
+    # --- Multi-source WS (AKTIF) ---
     pumpportal_ws: str = "wss://pumpportal.fun/api/data"
     raydium_ws: str = "wss://api.raydium.io/v2/ws"
     meteora_ws: str = "wss://meteora.ag/ws"
-    enable_raydium: bool = False
-    enable_meteora: bool = False
+    enable_raydium: bool = True
+    enable_meteora: bool = True
 
-    # --- DEXSCREENER DISCOVERY ---
+    # --- DEXSCREENER DISCOVERY (DIPERLUAS) ---
     enable_dexscreener_discovery: bool = True
-    discovery_interval_sec: int = 30
+    discovery_interval_sec: int = 25
     discovery_queries: Tuple[str, ...] = (
         "SOL", "PUMP", "RAY", "METEORA", "USDC",
         "AI", "TRUMP", "DOGE", "PEPE", "CAT",
         "BONK", "WIF", "MEME", "MOON", "SHIB",
+        "BABY", "FROG", "ELON", "MUSK", "BIDEN",
+        "GEM", "COIN", "TOKEN", "CRYPTO", "SOLANA",
     )
     discovery_max_per_query: int = 50
 
-    # --- WATCHLIST & PUMP.FUN API (EDIT 2 — sisipan baru) ---
+    # --- WATCHLIST (opsional) ---
     enable_watchlist: bool = True
-    watchlist_mints: Tuple[str, ...] = (
-        # Isi mint yang ingin selalu dipantau di sini:
-        # "fCUBpdeRn76xfRaa4UPHDauGeRG3EvMB3MjuRgdpump",
-    )
+    watchlist_mints: Tuple[str, ...] = ()
 
+    # --- PUMP.FUN FRONTEND API ---
     enable_pumpfun_api_discovery: bool = True
     pumpfun_api_url: str = (
         "https://frontend-api-v3.pump.fun/coins"
@@ -162,6 +162,26 @@ class Config:
     dexscreener_new_pools_url: str = (
         "https://api.dexscreener.com/token-profiles/latest/v1"
     )
+
+    # --- GECKOTERMINAL (v9) ---
+    enable_geckoterminal_discovery: bool = True
+    geckoterminal_new_pools_url: str = (
+        "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
+    )
+
+    # --- SOLANA TRACKER (v9) ---
+    enable_solanatracker_discovery: bool = True
+    solanatracker_trending_url: str = (
+        "https://data.solanatracker.io/tokens/trending"
+    )
+
+    # --- RPC LOGS FALLBACK (v9) ---
+    enable_rpc_logs_discovery: bool = True
+    pumpfun_program_id: str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+
+    # --- SWEEP LOOP (v9) ---
+    enable_sweep: bool = True
+    sweep_interval_sec: int = 30
 
     # --- MIGRATION FALLBACK POLLER ---
     enable_migration_poller: bool = True
@@ -191,8 +211,8 @@ class Config:
     )
 
     # --- Worker & cache ---
-    worker_count: int = 16
-    rpc_semaphore: int = 16
+    worker_count: int = 20
+    rpc_semaphore: int = 20
     evaluate_interval_sec: float = 1.0
     monitor_interval_sec: float = 2.0
     cache_ttl_holders_sec: int = 15
@@ -253,7 +273,6 @@ class TokenState:
     scored: bool = False
     signal_emitted: bool = False
 
-    # Security
     mint_authority_active: bool = False
     freeze_authority_active: bool = False
     metadata_mutable: bool = False
@@ -262,18 +281,15 @@ class TokenState:
     creator_rugpull_count: int = 0
     micro_wallet_count: int = 0
 
-    # Buyer quality
     real_buyers: int = 0
     bot_buyers: int = 0
     bot_ratio: float = 0.0
 
-    # Cluster
     fresh_wallet_count: int = 0
     fresh_wallet_ratio: float = 0.0
     similar_balance_wallets: int = 0
     cluster_pct: float = 0.0
 
-    # Post-migration
     is_migrated: bool = False
     pool_address: str = ""
     market_cap_usd: float = 0.0
@@ -281,14 +297,11 @@ class TokenState:
     migration_detected_at: float = 0.0
     migration_snipers: int = 0
 
-    # Pump.fun trap
     dev_sold_pct: float = 0.0
 
-    # Token-2022
     is_token_2022: bool = False
     is_from_dexscreener_pool: bool = False
 
-    # Rescan
     rescan_count: int = 0
     next_rescan_at: float = 0.0
 
@@ -358,7 +371,7 @@ class RpcClient:
         self.sem = asyncio.Semaphore(cfg.rpc_semaphore)
 
     async def start(self):
-        timeout = aiohttp.ClientTimeout(total=8)
+        timeout = aiohttp.ClientTimeout(total=10)
         self.session = aiohttp.ClientSession(timeout=timeout)
 
     async def close(self):
@@ -575,10 +588,6 @@ class RpcClient:
         return data
 
     async def get_token_authorities(self, mint: str) -> Tuple[bool, bool]:
-        """
-        Cek mint authority & freeze authority via RPC getAccountInfo.
-        Support standard SPL Token dan Token-2022.
-        """
         if not self.cfg.enable_token2022_rpc_check:
             report = await self.get_security_report(mint)
             token = report.get("token", {}) or {}
@@ -623,17 +632,14 @@ class RpcClient:
         value = (data.get("result") or {}).get("value")
         if not value:
             return None
-
         owner = value.get("owner", "")
         if owner != program_id:
             return None
 
         parsed = (value.get("data") or {}).get("parsed") or {}
         info = parsed.get("info") or {}
-
         mint_auth = info.get("mintAuthority")
         freeze_auth = info.get("freezeAuthority")
-
         return (bool(mint_auth), bool(freeze_auth))
 
     async def is_token_2022(self, mint: str) -> bool:
@@ -885,7 +891,7 @@ class RpcClient:
         self.cache.set(f"pool:{mint}", result)
         return result
 
-    # ---------- DISCOVERY TAMBAHAN ----------
+    # ---------- DISCOVERY SALURAN BARU ----------
 
     async def get_new_pools_from_dexscreener(self) -> List[str]:
         mints: List[str] = []
@@ -905,10 +911,7 @@ class RpcClient:
             pass
         return mints
 
-    # ---------- PUMP.FUN FRONTEND DISCOVERY (EDIT 3) ----------
-
     async def get_pumpfun_recent_coins(self) -> List[str]:
-        """Ambil daftar mint koin terbaru dari pump.fun frontend API."""
         mints: List[str] = []
         try:
             url = self.cfg.pumpfun_api_url
@@ -923,6 +926,85 @@ class RpcClient:
                 addr = it.get("mint") or it.get("address")
                 if addr:
                     mints.append(addr)
+        except Exception:
+            pass
+        return mints
+
+    async def get_geckoterminal_new_pools(self) -> List[str]:
+        mints: List[str] = []
+        try:
+            async with self.sem:
+                async with self.session.get(
+                    self.cfg.geckoterminal_new_pools_url,
+                    headers={"Accept": "application/json;version=20230302"},
+                ) as resp:
+                    if resp.status != 200:
+                        return mints
+                    data = await resp.json()
+            for p in (data.get("data") or [])[:80]:
+                rels = p.get("relationships") or {}
+                base = (rels.get("base_token") or {}).get("data") or {}
+                addr = base.get("id", "")
+                if "_" in addr:
+                    addr = addr.split("_", 1)[1]
+                if addr:
+                    mints.append(addr)
+        except Exception:
+            pass
+        return mints
+
+    async def get_solanatracker_trending(self) -> List[str]:
+        mints: List[str] = []
+        try:
+            async with self.sem:
+                async with self.session.get(
+                    self.cfg.solanatracker_trending_url
+                ) as resp:
+                    if resp.status != 200:
+                        return mints
+                    data = await resp.json()
+            items = data if isinstance(data, list) else data.get("tokens", [])
+            for it in items[:80]:
+                addr = it.get("mint") or it.get("address") or it.get("tokenAddress")
+                if addr:
+                    mints.append(addr)
+        except Exception:
+            pass
+        return mints
+
+    async def get_pumpfun_new_tokens_rpc(self) -> List[str]:
+        mints: List[str] = []
+        try:
+            payload = {
+                "jsonrpc": "2.0", "id": "1",
+                "method": "getSignaturesForAddress",
+                "params": [
+                    self.cfg.pumpfun_program_id,
+                    {"limit": 30},
+                ],
+            }
+            async with self.sem:
+                async with self.session.post(
+                    self.cfg.holder_rpc_url, json=payload
+                ) as resp:
+                    data = await resp.json()
+            sigs = data.get("result", []) or []
+            for s in sigs[:15]:
+                sig = s.get("signature")
+                if not sig:
+                    continue
+                tx = await self.get_transaction(sig)
+                if not tx:
+                    continue
+                try:
+                    msg = tx["transaction"]["message"]
+                    for key in msg.get("accountKeys", []):
+                        pub = key.get("pubkey") if isinstance(key, dict) else key
+                        if pub and pub.endswith("pump"):
+                            mints.append(pub)
+                            break
+                except Exception:
+                    continue
         except Exception:
             pass
         return mints
@@ -1386,7 +1468,7 @@ class TelegramAlerter:
             print("[telegram] token/chat_id kosong, alert dinonaktifkan")
             return
         self.session = aiohttp.ClientSession()
-        await self._send("✅ <b>[HIT-AND-RUN] scanner v8 online</b>")
+        await self._send("✅ <b>[HIT-AND-RUN] scanner v9 online</b>")
 
     async def close(self):
         if self.session:
@@ -1491,7 +1573,7 @@ class HealthServer:
         def index():
             return jsonify({
                 "service": "hitrun-scanner",
-                "version": "v8",
+                "version": "v9",
                 "ok": True,
                 "tokens_cached": len(self.scanner.tokens),
                 "signals_emitted": len(self.scanner.signals),
@@ -1588,7 +1670,9 @@ class HitAndRunScanner:
     async def pumpportal_listener(self):
         while self.running:
             try:
-                async with websockets.connect(self.cfg.pumpportal_ws) as ws:
+                async with websockets.connect(
+                    self.cfg.pumpportal_ws, ping_interval=20, ping_timeout=20
+                ) as ws:
                     await ws.send(json.dumps({"method": "subscribeNewToken"}))
                     await ws.send(json.dumps({"method": "subscribeMigration"}))
                     print("[ws:pumpfun] connected")
@@ -1603,6 +1687,50 @@ class HitAndRunScanner:
             except Exception as e:
                 print(f"[ws:pumpfun] error: {e}, reconnect 3s")
                 await asyncio.sleep(3)
+
+    async def raydium_listener(self):
+        if not self.cfg.enable_raydium:
+            return
+        while self.running:
+            try:
+                async with websockets.connect(
+                    self.cfg.raydium_ws, ping_interval=20, ping_timeout=20
+                ) as ws:
+                    # Raydium WS tidak selalu butuh subscription spesifik;
+                    # kalau ada, tambahkan di sini.
+                    print("[ws:raydium] connected")
+                    async for raw in ws:
+                        if not self.running:
+                            break
+                        try:
+                            msg = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        await self.handle_generic(msg, source="raydium")
+            except Exception as e:
+                print(f"[ws:raydium] error: {e}, reconnect 5s")
+                await asyncio.sleep(5)
+
+    async def meteora_listener(self):
+        if not self.cfg.enable_meteora:
+            return
+        while self.running:
+            try:
+                async with websockets.connect(
+                    self.cfg.meteora_ws, ping_interval=20, ping_timeout=20
+                ) as ws:
+                    print("[ws:meteora] connected")
+                    async for raw in ws:
+                        if not self.running:
+                            break
+                        try:
+                            msg = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        await self.handle_generic(msg, source="meteora")
+            except Exception as e:
+                print(f"[ws:meteora] error: {e}, reconnect 5s")
+                await asyncio.sleep(5)
 
     async def handle_pumpportal(self, msg: dict):
         tx_type = msg.get("txType")
@@ -1628,6 +1756,22 @@ class HitAndRunScanner:
         elif tx_type in ("buy", "sell"):
             await self.handle_trade(msg, source="pumpfun")
 
+    async def handle_generic(self, msg: dict, source: str):
+        mint = msg.get("mint") or msg.get("token") or msg.get("address")
+        if not mint:
+            return
+        if mint not in self.tokens:
+            self.tokens[mint] = TokenState(
+                mint=mint,
+                creator=msg.get("creator", ""),
+                source=source,
+                created_at=time.time(),
+                price=float(msg.get("price", 0) or 0),
+            )
+            await self.eval_queue.put(mint)
+            print(f"[new] {mint} ({source})")
+        await self.handle_trade(msg, source=source)
+
     async def handle_migration(self, msg: dict):
         mint = msg.get("mint")
         if not mint:
@@ -1650,7 +1794,7 @@ class HitAndRunScanner:
         print(f"[migration] {mint} → pool {t.pool_address}")
 
     async def handle_trade(self, msg: dict, source: str):
-        mint = msg.get("mint") or msg.get("token")
+        mint = msg.get("mint") or msg.get("token") or msg.get("address")
         t = self.tokens.get(mint)
         if not t:
             return
@@ -1683,13 +1827,13 @@ class HitAndRunScanner:
                 t.liquidity_usd = max(t.liquidity_usd, v_sol * 150)
 
     # --------------------------------------------------------
-    # 11.2 DEXSCREENER DISCOVERY (EDIT 4 — sumber 5 & 6 ditambah)
+    # 11.2 DISCOVERY LOOP (v9 — 10+ saluran)
     # --------------------------------------------------------
 
     async def dexscreener_discovery_loop(self):
         if not self.cfg.enable_dexscreener_discovery:
             return
-        print("[discovery] DexScreener multi-source discovery started")
+        print("[discovery] multi-source discovery started")
         while self.running:
             try:
                 mints: List[str] = []
@@ -1755,7 +1899,7 @@ class HitAndRunScanner:
                     except Exception:
                         pass
 
-                # 5. PUMP.FUN FRONTEND API — discovery langsung koin pump.fun
+                # 5. PUMP.FUN FRONTEND API
                 if self.cfg.enable_pumpfun_api_discovery:
                     try:
                         pump_mints = await self.rpc.get_pumpfun_recent_coins()
@@ -1763,9 +1907,33 @@ class HitAndRunScanner:
                     except Exception:
                         pass
 
-                # 6. WATCHLIST — paksa cek mint tertentu tiap putaran
+                # 6. WATCHLIST
                 if self.cfg.enable_watchlist and self.cfg.watchlist_mints:
                     mints.extend(self.cfg.watchlist_mints)
+
+                # 7. GECKOTERMINAL
+                if self.cfg.enable_geckoterminal_discovery:
+                    try:
+                        gt_mints = await self.rpc.get_geckoterminal_new_pools()
+                        mints.extend(gt_mints)
+                    except Exception:
+                        pass
+
+                # 8. SOLANA TRACKER
+                if self.cfg.enable_solanatracker_discovery:
+                    try:
+                        st_mints = await self.rpc.get_solanatracker_trending()
+                        mints.extend(st_mints)
+                    except Exception:
+                        pass
+
+                # 9. RPC LOGS FALLBACK
+                if self.cfg.enable_rpc_logs_discovery:
+                    try:
+                        rpc_mints = await self.rpc.get_pumpfun_new_tokens_rpc()
+                        mints.extend(rpc_mints)
+                    except Exception:
+                        pass
 
                 mints = list(dict.fromkeys(mints))
                 added = 0
@@ -2044,7 +2212,7 @@ class HitAndRunScanner:
         return 0.0
 
     # --------------------------------------------------------
-    # 11.4 MIGRATION POLLER (EDIT 5 — longgarkan kandidat) & RESCAN
+    # 11.4 MIGRATION POLLER & RESCAN + SWEEP
     # --------------------------------------------------------
 
     async def migration_poller(self):
@@ -2061,7 +2229,6 @@ class HitAndRunScanner:
                     age_hours = (now - t.created_at) / 3600.0
                     if age_hours > self.cfg.migration_poll_track_hours:
                         continue
-                    # EDIT 5: longgarkan filter kandidat
                     if t.source in ("pumpfun", "dexscreener"):
                         candidates.append(mint)
                     elif t.bonding_pct > 0:
@@ -2101,6 +2268,8 @@ class HitAndRunScanner:
             await asyncio.sleep(self.cfg.migration_poll_interval_sec)
 
     async def rescan_loop(self):
+        sweep_counter = 0
+        sweep_interval_ticks = max(1, self.cfg.sweep_interval_sec // 2)
         while self.running:
             try:
                 now = time.time()
@@ -2113,6 +2282,26 @@ class HitAndRunScanner:
                             f"[rescan] requeue {mint} "
                             f"(attempt {t.rescan_count}/{self.cfg.max_rescan_count})"
                         )
+
+                if self.cfg.enable_sweep:
+                    sweep_counter += 1
+                    if sweep_counter >= sweep_interval_ticks:
+                        sweep_counter = 0
+                        swept = 0
+                        for mint, t in list(self.tokens.items()):
+                            if t.signal_emitted or t.scored:
+                                continue
+                            age = now - t.created_at
+                            if age > self.cfg.max_rescan_age_sec:
+                                continue
+                            if t.rescan_count >= self.cfg.max_rescan_count:
+                                continue
+                            t.scored = False
+                            t.rescan_count += 1
+                            await self.eval_queue.put(mint)
+                            swept += 1
+                        if swept > 0:
+                            print(f"[sweep] requeue {swept} tokens")
             except Exception as e:
                 print(f"[rescan-error] {e}")
             await asyncio.sleep(2.0)
@@ -2207,6 +2396,8 @@ class HitAndRunScanner:
 
         tasks = [
             asyncio.create_task(self.pumpportal_listener()),
+            asyncio.create_task(self.raydium_listener()),
+            asyncio.create_task(self.meteora_listener()),
             asyncio.create_task(self.dexscreener_discovery_loop()),
             asyncio.create_task(self.migration_poller()),
             asyncio.create_task(self.signal_consumer()),
