@@ -1,11 +1,12 @@
 # ============================================================
-# HITRUN.PY — Hit-and-Run Scanner v9 (MAX DISCOVERY)
+# HITRUN.PY — Hit-and-Run Scanner v10 (Birth Signals)
 # ============================================================
-# Perubahan v9:
-#  - 10+ saluran discovery (WS multi-DEX + GeckoTerminal + SolanaTracker
-#    + RPC logs + Sweep loop)
-#  - Semua filter keamanan tetap ketat
-#  - Coverage ~800-1200 koin/putaran
+# v10 menambahkan 5 sinyal kelahiran untuk deteksi dini:
+#  1. Alpha wallet count (kualitas 20 wallet pertama)
+#  2. Bundle detection di creation block
+#  3. Liquidity velocity (SOL/menit)
+#  4. Holder growth velocity (holder/menit)
+#  5. Social presence (Twitter/Telegram/Website)
 # ============================================================
 
 import asyncio
@@ -19,10 +20,10 @@ import aiohttp
 import websockets
 import urllib.request
 from collections import defaultdict, deque
-import threading
-from flask import Flask, jsonify
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Set
+import threading
+from flask import Flask, jsonify
 
 
 # ============================================================
@@ -51,7 +52,7 @@ class Config:
     enable_post_migration: bool = True
     min_market_cap_usd: float = 15_000
     max_market_cap_usd: float = 5_000_000
-    max_pool_age_minutes: int = 10080        # 7 hari
+    max_pool_age_minutes: int = 10080
     min_pool_liquidity_usd: float = 8_000
     enable_post_migration_rescan: bool = True
 
@@ -112,6 +113,38 @@ class Config:
     max_dev_sell_pct: float = 0.0
     max_migration_snipers: int = 5
 
+    # ========================================================
+    # --- BIRTH SIGNALS (v10) ---
+    # ========================================================
+    enable_birth_signal_check: bool = True
+    birth_signal_min_score: float = 20.0
+    birth_signal_strong_score: float = 50.0
+
+    # Sinyal 1: Alpha wallet (umur wallet, bukan bot baru)
+    alpha_wallet_min_age_hours: float = 720.0        # > 30 hari = wallet lama
+    alpha_wallet_min_balance_sol: float = 0.5        # punya cukup SOL
+    min_alpha_wallets: int = 2                       # minimal 2 alpha di 20 buyer pertama
+    strong_alpha_wallets: int = 4
+
+    # Sinyal 2: Bundle di creation block
+    detect_creation_block_bundle: bool = True
+    max_creation_block_buyers: int = 3               # >3 di blok kreasi = bundle
+
+    # Sinyal 3: Liquidity velocity (SOL/menit)
+    liquidity_velocity_window_sec: int = 300         # window 5 menit
+    min_liquidity_velocity_sol_per_min: float = 0.3  # 0.3 SOL/menit minimum
+    strong_liquidity_velocity_sol_per_min: float = 1.5
+
+    # Sinyal 4: Holder growth velocity (holder/menit)
+    holder_growth_window_sec: int = 300
+    min_holder_growth_per_min: float = 0.5
+    strong_holder_growth_per_min: float = 3.0
+
+    # Sinyal 5: Social presence
+    check_social_presence: bool = True
+    social_presence_weight: float = 15.0
+    require_at_least_one_social: bool = False        # jangan wajib, tapi bonus
+
     # --- Skor minimum ---
     min_conviction_score: float = 60.0
 
@@ -126,14 +159,14 @@ class Config:
     trailing_stop_pct: float = 25.0
     time_stop_hours: int = 24
 
-    # --- Multi-source WS (AKTIF) ---
+    # --- Multi-source WS ---
     pumpportal_ws: str = "wss://pumpportal.fun/api/data"
     raydium_ws: str = "wss://api.raydium.io/v2/ws"
     meteora_ws: str = "wss://meteora.ag/ws"
     enable_raydium: bool = True
     enable_meteora: bool = True
 
-    # --- DEXSCREENER DISCOVERY (DIPERLUAS) ---
+    # --- DEXSCREENER DISCOVERY ---
     enable_dexscreener_discovery: bool = True
     discovery_interval_sec: int = 25
     discovery_queries: Tuple[str, ...] = (
@@ -145,45 +178,46 @@ class Config:
     )
     discovery_max_per_query: int = 50
 
-    # --- WATCHLIST (opsional) ---
+    # --- WATCHLIST ---
     enable_watchlist: bool = True
     watchlist_mints: Tuple[str, ...] = ()
 
-    # --- PUMP.FUN FRONTEND API ---
+    # --- PUMP.FUN API ---
     enable_pumpfun_api_discovery: bool = True
     pumpfun_api_url: str = (
         "https://frontend-api-v3.pump.fun/coins"
         "?offset=0&limit=50&sort=created&order=DESC&includeNsfw=false"
     )
+    pumpfun_coin_url: str = "https://frontend-api-v3.pump.fun/coins/"
 
-    # --- NEW POOLS DISCOVERY ---
+    # --- NEW POOLS ---
     enable_new_pools_discovery: bool = True
     new_pools_interval_sec: int = 20
     dexscreener_new_pools_url: str = (
         "https://api.dexscreener.com/token-profiles/latest/v1"
     )
 
-    # --- GECKOTERMINAL (v9) ---
+    # --- GECKOTERMINAL ---
     enable_geckoterminal_discovery: bool = True
     geckoterminal_new_pools_url: str = (
         "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
     )
 
-    # --- SOLANA TRACKER (v9) ---
+    # --- SOLANA TRACKER ---
     enable_solanatracker_discovery: bool = True
     solanatracker_trending_url: str = (
         "https://data.solanatracker.io/tokens/trending"
     )
 
-    # --- RPC LOGS FALLBACK (v9) ---
+    # --- RPC LOGS ---
     enable_rpc_logs_discovery: bool = True
     pumpfun_program_id: str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
-    # --- SWEEP LOOP (v9) ---
+    # --- SWEEP ---
     enable_sweep: bool = True
     sweep_interval_sec: int = 30
 
-    # --- MIGRATION FALLBACK POLLER ---
+    # --- MIGRATION POLLER ---
     enable_migration_poller: bool = True
     migration_poll_interval_sec: int = 45
     migration_poll_track_hours: int = 24
@@ -221,6 +255,7 @@ class Config:
     cache_ttl_security_sec: int = 45
     cache_ttl_wallet_age_sec: int = 600
     cache_ttl_buyer_quality_sec: int = 120
+    cache_ttl_social_sec: int = 300
 
     # --- Funding graph ---
     funding_window_hours: int = 72
@@ -305,6 +340,23 @@ class TokenState:
     rescan_count: int = 0
     next_rescan_at: float = 0.0
 
+    # --- BIRTH SIGNALS (v10) ---
+    liquidity_history: deque = field(default_factory=lambda: deque(maxlen=600))
+    holder_history: deque = field(default_factory=lambda: deque(maxlen=600))
+    sol_in_bonding_history: deque = field(default_factory=lambda: deque(maxlen=600))
+
+    liquidity_velocity: float = 0.0
+    holder_growth_velocity: float = 0.0
+    alpha_wallet_count: int = 0
+    bundle_creation_block_count: int = 0
+    has_twitter: bool = False
+    has_telegram: bool = False
+    has_website: bool = False
+    social_score: float = 0.0
+    birth_signal_score: float = 0.0
+    birth_signals_passed: List[str] = field(default_factory=list)
+    birth_signals_failed: List[str] = field(default_factory=list)
+
 
 @dataclass
 class Signal:
@@ -316,6 +368,7 @@ class Signal:
     timestamp: float
     source: str = ""
     phase: str = "bonding"
+    birth_score: float = 0.0
 
 
 @dataclass
@@ -551,6 +604,121 @@ class RpcClient:
                 return data.get("result")
             except Exception:
                 return None
+
+    # ---------- BIRTH SIGNAL: ALPHA WALLET ----------
+
+    async def count_alpha_wallets(self, wallets: List[str]) -> int:
+        """
+        Hitung wallet 'alpha' dari daftar buyer awal.
+        Heuristik: umur wallet > 30 hari DAN saldo > 0.5 SOL.
+        """
+        if not wallets:
+            return 0
+        target = wallets[:self.cfg.max_early_buyers_check]
+        ages, balances = await asyncio.gather(
+            asyncio.gather(*[self.get_wallet_age_hours(w) for w in target]),
+            asyncio.gather(*[self.get_wallet_balance_sol(w) for w in target]),
+        )
+        count = 0
+        for age, bal in zip(ages, balances):
+            if age >= self.cfg.alpha_wallet_min_age_hours and bal >= self.cfg.alpha_wallet_min_balance_sol:
+                count += 1
+        return count
+
+    # ---------- BIRTH SIGNAL: CREATION BLOCK BUNDLE ----------
+
+    async def detect_creation_block_bundle(
+        self, mint: str, creator: str, created_at: float
+    ) -> int:
+        """
+        Deteksi jumlah buyer di blok yang sama dengan creation block.
+        Return: jumlah buyer di creation block (creator dikecualikan).
+        """
+        if not self.cfg.detect_creation_block_bundle:
+            return 0
+
+        cached = self.cache.get(f"cbundle:{mint}", 300)
+        if cached is not None:
+            return cached
+
+        # Ambil signature paling awal dari mint account
+        sigs = await self.get_signatures(mint, limit=5)
+        if not sigs:
+            self.cache.set(f"cbundle:{mint}", 0)
+            return 0
+
+        # Cari signature creation (paling tua)
+        creation_sig = None
+        for s in sigs:
+            bt = s.get("blockTime", 0) or 0
+            if abs(bt - created_at) < 60:
+                creation_sig = s.get("signature")
+                break
+
+        if not creation_sig:
+            self.cache.set(f"cbundle:{mint}", 0)
+            return 0
+
+        # Ambil transaksi creation
+        tx = await self.get_transaction(creation_sig)
+        if not tx or not tx.get("meta"):
+            self.cache.set(f"cbundle:{mint}", 0)
+            return 0
+
+        creation_slot = tx.get("slot", 0)
+        if creation_slot <= 0:
+            self.cache.set(f"cbundle:{mint}", 0)
+            return 0
+
+        # Hitung wallet unik yang melakukan pembelian di slot yang sama
+        # Heuristik: cek pre/post token balances
+        pre = tx["meta"].get("preTokenBalances", []) or []
+        post = tx["meta"].get("postTokenBalances", []) or []
+        buyers = set()
+        for pb in post:
+            if pb.get("mint") == mint:
+                owner = pb.get("owner", "")
+                if owner and owner != creator:
+                    buyers.add(owner)
+
+        count = len(buyers)
+        self.cache.set(f"cbundle:{mint}", count)
+        return count
+
+    # ---------- BIRTH SIGNAL: SOCIAL PRESENCE ----------
+
+    async def check_social_presence(self, mint: str) -> Tuple[bool, bool, bool]:
+        """
+        Cek apakah koin punya Twitter, Telegram, Website via pump.fun API.
+        Return: (has_twitter, has_telegram, has_website)
+        """
+        if not self.cfg.check_social_presence:
+            return False, False, False
+
+        cached = self.cache.get(f"social:{mint}", self.cfg.cache_ttl_social_sec)
+        if cached is not None:
+            return cached
+
+        url = f"{self.cfg.pumpfun_coin_url}{mint}"
+        async with self.sem:
+            try:
+                async with self.session.get(url) as resp:
+                    if resp.status != 200:
+                        result = (False, False, False)
+                        self.cache.set(f"social:{mint}", result)
+                        return result
+                    data = await resp.json()
+            except Exception:
+                result = (False, False, False)
+                self.cache.set(f"social:{mint}", result)
+                return result
+
+        has_twitter = bool(data.get("twitter"))
+        has_telegram = bool(data.get("telegram"))
+        has_website = bool(data.get("website"))
+        result = (has_twitter, has_telegram, has_website)
+        self.cache.set(f"social:{mint}", result)
+        return result
 
     # ---------- DEV & SECURITY ----------
 
@@ -891,7 +1059,7 @@ class RpcClient:
         self.cache.set(f"pool:{mint}", result)
         return result
 
-    # ---------- DISCOVERY SALURAN BARU ----------
+    # ---------- DISCOVERY TAMBAHAN ----------
 
     async def get_new_pools_from_dexscreener(self) -> List[str]:
         mints: List[str] = []
@@ -1008,8 +1176,6 @@ class RpcClient:
         except Exception:
             pass
         return mints
-
-    # ---------- MIGRATION FALLBACK ----------
 
     async def check_migration_status(self, mint: str) -> Optional[dict]:
         cached = self.cache.get(f"migstat:{mint}", 45)
@@ -1241,12 +1407,75 @@ class WalletClusterAnalyzer:
 
 
 # ============================================================
-# 7. FAST SCORER
+# 7. FAST SCORER + BIRTH SIGNAL SCORER
 # ============================================================
 
 class FastScorer:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+
+    def score_birth_signals(self, t: TokenState) -> Tuple[float, List[str], List[str]]:
+        """
+        Skor sinyal kelahiran. Return (score, passed_signals, failed_signals).
+        Total max = 100 (5 sinyal × 20).
+        """
+        passed: List[str] = []
+        failed: List[str] = []
+        score = 0.0
+
+        # Sinyal 1: Alpha wallet count
+        if t.alpha_wallet_count >= self.cfg.strong_alpha_wallets:
+            score += 25
+            passed.append(f"alpha_strong:{t.alpha_wallet_count}")
+        elif t.alpha_wallet_count >= self.cfg.min_alpha_wallets:
+            score += 15
+            passed.append(f"alpha_ok:{t.alpha_wallet_count}")
+        else:
+            failed.append(f"alpha_low:{t.alpha_wallet_count}")
+
+        # Sinyal 2: Bundle di creation block
+        if t.bundle_creation_block_count <= 1:
+            score += 20
+            passed.append("no_creation_bundle")
+        elif t.bundle_creation_block_count <= self.cfg.max_creation_block_buyers:
+            score += 10
+            passed.append(f"creation_bundle_minor:{t.bundle_creation_block_count}")
+        else:
+            failed.append(f"creation_bundle:{t.bundle_creation_block_count}")
+
+        # Sinyal 3: Liquidity velocity
+        if t.liquidity_velocity >= self.cfg.strong_liquidity_velocity_sol_per_min:
+            score += 20
+            passed.append(f"liq_velocity_strong:{t.liquidity_velocity:.2f}")
+        elif t.liquidity_velocity >= self.cfg.min_liquidity_velocity_sol_per_min:
+            score += 10
+            passed.append(f"liq_velocity_ok:{t.liquidity_velocity:.2f}")
+        else:
+            failed.append(f"liq_velocity_low:{t.liquidity_velocity:.2f}")
+
+        # Sinyal 4: Holder growth velocity
+        if t.holder_growth_velocity >= self.cfg.strong_holder_growth_per_min:
+            score += 20
+            passed.append(f"holder_velocity_strong:{t.holder_growth_velocity:.2f}")
+        elif t.holder_growth_velocity >= self.cfg.min_holder_growth_per_min:
+            score += 10
+            passed.append(f"holder_velocity_ok:{t.holder_growth_velocity:.2f}")
+        else:
+            failed.append(f"holder_velocity_low:{t.holder_growth_velocity:.2f}")
+
+        # Sinyal 5: Social presence
+        if self.cfg.check_social_presence:
+            social_count = sum([t.has_twitter, t.has_telegram, t.has_website])
+            if social_count >= 2:
+                score += 15
+                passed.append(f"social_strong:{social_count}")
+            elif social_count >= 1:
+                score += 8
+                passed.append(f"social_ok:{social_count}")
+            else:
+                failed.append("no_social")
+
+        return round(score, 2), passed, failed
 
     def score_bonding(self, t: TokenState) -> Tuple[float, List[str], List[str]]:
         reasons: List[str] = []
@@ -1274,10 +1503,10 @@ class FastScorer:
 
         if self.cfg.enable_buyer_quality_check:
             if t.real_buyers >= self.cfg.min_real_buyers:
-                score += 30
+                score += 20
                 reasons.append(f"real_buyers:{t.real_buyers}")
             elif t.real_buyers >= 1:
-                score += 15
+                score += 10
                 reasons.append(f"few_real_buyers:{t.real_buyers}")
             else:
                 red_flags.append(f"no_real_buyers")
@@ -1427,15 +1656,16 @@ class TradeLogger:
             "source": signal.source,
             "phase": signal.phase,
             "score": signal.score,
+            "birth_score": signal.birth_score,
             "price": signal.entry_price,
             "reasons": signal.reasons,
             "bonding_pct": token.bonding_pct,
             "mcap": token.market_cap_usd,
             "liquidity": token.liquidity_usd,
-            "real_buyers": token.real_buyers,
-            "bot_ratio": token.bot_ratio,
-            "dev_sold_pct": token.dev_sold_pct,
-            "migration_snipers": token.migration_snipers,
+            "alpha_wallets": token.alpha_wallet_count,
+            "liq_velocity": token.liquidity_velocity,
+            "holder_velocity": token.holder_growth_velocity,
+            "social_score": token.social_score,
         })
 
     def log_exit(self, mint: str, price: float, reason: str, pnl_pct: float):
@@ -1468,7 +1698,7 @@ class TelegramAlerter:
             print("[telegram] token/chat_id kosong, alert dinonaktifkan")
             return
         self.session = aiohttp.ClientSession()
-        await self._send("✅ <b>[HIT-AND-RUN] scanner v9 online</b>")
+        await self._send("✅ <b>[HIT-AND-RUN] scanner v10 online (Birth Signals)</b>")
 
     async def close(self):
         if self.session:
@@ -1476,13 +1706,15 @@ class TelegramAlerter:
 
     async def send_signal_alert(self, signal: Signal, token: TokenState):
         emoji = "🟢" if signal.score >= 80 else "🟡"
+        birth_emoji = "🔥" if signal.birth_score >= 50 else "⭐"
         phase_label = "PRE-BONDING" if signal.phase == "bonding" else "POST-MIGRATION"
         text = (
             f"{emoji} <b>[HIT-AND-RUN] SIGNAL ({phase_label})</b>\n"
+            f"{birth_emoji} <b>BIRTH SCORE: {signal.birth_score:.0f}/100</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<b>Token:</b> <code>{signal.mint}</code>\n"
             f"<b>Source:</b> {signal.source}\n"
-            f"<b>Score:</b> {signal.score}/100\n"
+            f"<b>Conviction:</b> {signal.score}/100\n"
             f"<b>Entry Price:</b> <code>{signal.entry_price:.8f}</code>\n"
             + (
                 f"<b>Bonding:</b> {token.bonding_pct:.1f}%\n"
@@ -1493,22 +1725,23 @@ class TelegramAlerter:
             f"<b>Liquidity:</b> ${token.liquidity_usd:,.0f}\n"
             f"<b>Holders:</b> {len(token.holders)}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Buyer Quality:</b>\n"
-            f"  Real Buyers: {token.real_buyers}\n"
-            f"  Bot Ratio: {token.bot_ratio:.0%}\n"
+            f"<b>🌟 BIRTH SIGNALS:</b>\n"
+            f"  Alpha Wallets: {token.alpha_wallet_count}\n"
+            f"  Creation Bundle: {token.bundle_creation_block_count}\n"
+            f"  Liq Velocity: {token.liquidity_velocity:.2f} SOL/min\n"
+            f"  Holder Velocity: {token.holder_growth_velocity:.2f} holder/min\n"
+            f"  Social: {'✅' if (token.has_twitter or token.has_telegram or token.has_website) else '❌'}"
+            f" (TW:{'✅' if token.has_twitter else '❌'} TG:{'✅' if token.has_telegram else '❌'} WEB:{'✅' if token.has_website else '❌'})\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<b>Keamanan:</b>\n"
             f"  Mint Auth: {'❌' if token.mint_authority_active else '✅'}\n"
             f"  Freeze Auth: {'❌' if token.freeze_authority_active else '✅'}\n"
-            f"  Metadata: {'⚠️ mutable' if token.metadata_mutable else '✅ immutable'}\n"
-            f"  Sell Tax: {token.transfer_fee_pct:.1f}%\n"
-            f"  Honeypot: {'❌' if not token.sell_simulation_ok else '✅'}\n"
             f"  LP Lock: {'✅' if token.lp_locked else '❌'}\n"
+            f"  Honeypot: {'❌' if not token.sell_simulation_ok else '✅'}\n"
             f"  Dev Sold: {token.dev_sold_pct:.1f}%\n"
-            f"  Fresh Wallets: {token.fresh_wallet_count} ({token.fresh_wallet_ratio:.0%})\n"
-            f"  Similar Balance: {token.similar_balance_wallets}\n"
             f"  Cluster: {token.cluster_pct:.0f}%\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Alasan:</b>\n" +
+            f"<b>Alasan Lolos:</b>\n" +
             "\n".join(f"  • {r}" for r in signal.reasons) +
             f"\n━━━━━━━━━━━━━━━━━━━━\n"
             f"<b>Exit Plan:</b>\n"
@@ -1573,7 +1806,7 @@ class HealthServer:
         def index():
             return jsonify({
                 "service": "hitrun-scanner",
-                "version": "v9",
+                "version": "v10",
                 "ok": True,
                 "tokens_cached": len(self.scanner.tokens),
                 "signals_emitted": len(self.scanner.signals),
@@ -1596,6 +1829,7 @@ class HealthServer:
                     {
                         "mint": s.mint,
                         "score": s.score,
+                        "birth_score": s.birth_score,
                         "phase": s.phase,
                         "source": s.source,
                         "entry_price": s.entry_price,
@@ -1664,7 +1898,7 @@ class HitAndRunScanner:
         self.running = True
 
     # --------------------------------------------------------
-    # 11.1 INGESTION — PumpPortal
+    # 11.1 INGESTION
     # --------------------------------------------------------
 
     async def pumpportal_listener(self):
@@ -1696,8 +1930,6 @@ class HitAndRunScanner:
                 async with websockets.connect(
                     self.cfg.raydium_ws, ping_interval=20, ping_timeout=20
                 ) as ws:
-                    # Raydium WS tidak selalu butuh subscription spesifik;
-                    # kalau ada, tambahkan di sini.
                     print("[ws:raydium] connected")
                     async for raw in ws:
                         if not self.running:
@@ -1740,7 +1972,7 @@ class HitAndRunScanner:
                 return
             v_sol = float(msg.get("vSolInBondingCurve", 0) or 0)
             bonding_pct = min(100.0, (v_sol / 85.0) * 100) if v_sol > 0 else 0.0
-            self.tokens[mint] = TokenState(
+            t = TokenState(
                 mint=mint,
                 creator=msg.get("traderPublicKey", ""),
                 source="pumpfun",
@@ -1749,6 +1981,8 @@ class HitAndRunScanner:
                 bonding_pct=bonding_pct,
                 liquidity_usd=max(0.0, v_sol * 150),
             )
+            t.sol_in_bonding_history.append((time.time(), v_sol))
+            self.tokens[mint] = t
             await self.eval_queue.put(mint)
             print(f"[new] {mint} (pumpfun, bonding={bonding_pct:.1f}%)")
         elif tx_type == "migrate":
@@ -1820,14 +2054,17 @@ class HitAndRunScanner:
         if price > 0:
             t.price = price
             self.price_history[mint].append((time.time(), price))
+
+        # BIRTH SIGNAL: track SOL in bonding untuk velocity
         v_sol = float(msg.get("vSolInBondingCurve", 0) or 0)
         if v_sol > 0:
             t.bonding_pct = min(100.0, (v_sol / 85.0) * 100)
+            t.sol_in_bonding_history.append((time.time(), v_sol))
             if not t.is_migrated:
                 t.liquidity_usd = max(t.liquidity_usd, v_sol * 150)
 
     # --------------------------------------------------------
-    # 11.2 DISCOVERY LOOP (v9 — 10+ saluran)
+    # 11.2 DISCOVERY
     # --------------------------------------------------------
 
     async def dexscreener_discovery_loop(self):
@@ -1838,7 +2075,6 @@ class HitAndRunScanner:
             try:
                 mints: List[str] = []
 
-                # 1. Search queries
                 for q in self.cfg.discovery_queries:
                     try:
                         url = f"{self.cfg.dexscreener_search_url}?q={q}"
@@ -1855,7 +2091,6 @@ class HitAndRunScanner:
                     except Exception:
                         pass
 
-                # 2. Boosts & profiles
                 for boost_url in (
                     self.cfg.dexscreener_boosts_latest,
                     self.cfg.dexscreener_boosts_top,
@@ -1875,7 +2110,6 @@ class HitAndRunScanner:
                     except Exception:
                         pass
 
-                # 3. Raydium pools
                 try:
                     async with self.rpc.sem:
                         async with self.rpc.session.get(self.cfg.raydium_pools_url) as resp:
@@ -1891,47 +2125,36 @@ class HitAndRunScanner:
                 except Exception:
                     pass
 
-                # 4. DexScreener NEW POOLS
                 if self.cfg.enable_new_pools_discovery:
                     try:
-                        new_mints = await self.rpc.get_new_pools_from_dexscreener()
-                        mints.extend(new_mints)
+                        mints.extend(await self.rpc.get_new_pools_from_dexscreener())
                     except Exception:
                         pass
 
-                # 5. PUMP.FUN FRONTEND API
                 if self.cfg.enable_pumpfun_api_discovery:
                     try:
-                        pump_mints = await self.rpc.get_pumpfun_recent_coins()
-                        mints.extend(pump_mints)
+                        mints.extend(await self.rpc.get_pumpfun_recent_coins())
                     except Exception:
                         pass
 
-                # 6. WATCHLIST
                 if self.cfg.enable_watchlist and self.cfg.watchlist_mints:
                     mints.extend(self.cfg.watchlist_mints)
 
-                # 7. GECKOTERMINAL
                 if self.cfg.enable_geckoterminal_discovery:
                     try:
-                        gt_mints = await self.rpc.get_geckoterminal_new_pools()
-                        mints.extend(gt_mints)
+                        mints.extend(await self.rpc.get_geckoterminal_new_pools())
                     except Exception:
                         pass
 
-                # 8. SOLANA TRACKER
                 if self.cfg.enable_solanatracker_discovery:
                     try:
-                        st_mints = await self.rpc.get_solanatracker_trending()
-                        mints.extend(st_mints)
+                        mints.extend(await self.rpc.get_solanatracker_trending())
                     except Exception:
                         pass
 
-                # 9. RPC LOGS FALLBACK
                 if self.cfg.enable_rpc_logs_discovery:
                     try:
-                        rpc_mints = await self.rpc.get_pumpfun_new_tokens_rpc()
-                        mints.extend(rpc_mints)
+                        mints.extend(await self.rpc.get_pumpfun_new_tokens_rpc())
                     except Exception:
                         pass
 
@@ -1955,7 +2178,7 @@ class HitAndRunScanner:
             await asyncio.sleep(self.cfg.discovery_interval_sec)
 
     # --------------------------------------------------------
-    # 11.3 WORKER POOL
+    # 11.3 WORKER + EVALUATE
     # --------------------------------------------------------
 
     async def worker(self, worker_id: int):
@@ -1992,6 +2215,7 @@ class HitAndRunScanner:
             self.tokens.pop(mint, None)
             return
 
+        # ---------- PENGECEKAN PARALEL ----------
         (
             holders,
             lp_info,
@@ -2004,6 +2228,8 @@ class HitAndRunScanner:
             pool_data,
             buyer_quality,
             dev_sold,
+            social,
+            bundle_block,
         ) = await asyncio.gather(
             self.rpc.get_holders(mint),
             self.rpc.get_lp_info(mint),
@@ -2017,12 +2243,15 @@ class HitAndRunScanner:
             self.rpc.analyze_buyer_quality(self.buyers_buffer.get(mint, [])),
             self.rpc.check_dev_sold(mint, t.creator, t.created_at)
             if t.creator else self._zero(),
+            self.rpc.check_social_presence(mint),
+            self.rpc.detect_creation_block_bundle(mint, t.creator, t.created_at),
         )
 
         locked, liq_usd, lp_pool, rug_score, rug_flags = lp_info
         mint_auth, freeze_auth = authorities
         rugpull_count, _ = creator_rep
         real_buyers, bot_buyers, bot_ratio = buyer_quality
+        has_tw, has_tg, has_web = social
 
         t.holders = holders
         t.liquidity_usd = max(t.liquidity_usd, liq_usd)
@@ -2040,6 +2269,10 @@ class HitAndRunScanner:
         t.bot_buyers = bot_buyers
         t.bot_ratio = bot_ratio
         t.dev_sold_pct = dev_sold
+        t.has_twitter = has_tw
+        t.has_telegram = has_tg
+        t.has_website = has_web
+        t.bundle_creation_block_count = bundle_block
 
         if pool_data:
             t.market_cap_usd = pool_data.get("market_cap", 0.0)
@@ -2055,6 +2288,46 @@ class HitAndRunScanner:
                 t.price = pool_data["price"]
                 self.price_history[mint].append((now, t.price))
 
+        # ---------- BIRTH SIGNALS CALCULATION ----------
+        # 1. Track holder history untuk velocity
+        t.holder_history.append((now, len(holders)))
+
+        # 2. Liquidity velocity (SOL/menit)
+        if len(t.sol_in_bonding_history) >= 2:
+            oldest = t.sol_in_bonding_history[0]
+            newest = t.sol_in_bonding_history[-1]
+            dt_min = (newest[0] - oldest[0]) / 60.0
+            if dt_min > 0.05:
+                t.liquidity_velocity = max(0.0, (newest[1] - oldest[1]) / dt_min)
+        elif t.is_migrated and pool_data:
+            # Fallback untuk post-migration: pakai USD liquidity history
+            pass
+
+        # 3. Holder growth velocity
+        if len(t.holder_history) >= 2:
+            oldest_h = t.holder_history[0]
+            newest_h = t.holder_history[-1]
+            dt_min_h = (newest_h[0] - oldest_h[0]) / 60.0
+            if dt_min_h > 0.05:
+                t.holder_growth_velocity = max(
+                    0.0, (newest_h[1] - oldest_h[1]) / dt_min_h
+                )
+
+        # 4. Alpha wallet count
+        if self.cfg.enable_birth_signal_check:
+            early_wallets = [b["wallet"] for b in self.buyers_buffer.get(mint, [])]
+            t.alpha_wallet_count = await self.rpc.count_alpha_wallets(early_wallets)
+
+        # 5. Social score
+        t.social_score = (1 if has_tw else 0) + (1 if has_tg else 0) + (1 if has_web else 0)
+
+        # Hitung skor sinyal kelahiran
+        birth_score, birth_passed, birth_failed = self.scorer.score_birth_signals(t)
+        t.birth_signal_score = birth_score
+        t.birth_signals_passed = birth_passed
+        t.birth_signals_failed = birth_failed
+
+        # ---------- HARGA 5M LALU ----------
         history = self.price_history.get(mint)
         if history and len(history) > 1:
             cutoff = now - 300
@@ -2063,6 +2336,7 @@ class HitAndRunScanner:
         else:
             t.price_at_5m_ago = t.price
 
+        # ---------- SECURITY CHECKS ----------
         buyers = self.buyers_buffer.get(mint, [])
         bundle_count, _ = self.security.detect_bundle(buyers)
         sniper_count, _ = self.security.detect_sniper(buyers, t.created_at)
@@ -2101,6 +2375,7 @@ class HitAndRunScanner:
             if holders else 0
         )
 
+        # ---------- RED FLAGS ----------
         red_flags: List[str] = []
 
         if bundle_count > self.cfg.max_bundle_wallets:
@@ -2153,6 +2428,17 @@ class HitAndRunScanner:
         red_flags.extend(cluster_flags)
         red_flags.extend(rug_flags)
 
+        # ---------- BIRTH SIGNAL GATE ----------
+        if self.cfg.enable_birth_signal_check:
+            if t.birth_signal_score < self.cfg.birth_signal_min_score:
+                red_flags.append(
+                    f"birth_score_low:{t.birth_signal_score:.0f}"
+                    f"(min:{self.cfg.birth_signal_min_score})"
+                )
+            if self.cfg.require_at_least_one_social and not any([has_tw, has_tg, has_web]):
+                red_flags.append("no_social_presence")
+
+        # ---------- SKOR ----------
         if t.is_migrated and self.cfg.enable_post_migration:
             score, reasons, score_flags = self.scorer.score_post_migration(t)
             phase = "post_migration"
@@ -2160,11 +2446,20 @@ class HitAndRunScanner:
             score, reasons, score_flags = self.scorer.score_bonding(t)
             phase = "bonding"
 
+        # Bonus: tambahkan birth score ke conviction score
+        score += t.birth_signal_score * 0.3
+        score = round(min(100, score), 2)
+
+        reasons.extend(t.birth_signals_passed)
         red_flags.extend(score_flags)
         t.scored = True
 
+        # ---------- SKIP ----------
         if red_flags:
-            print(f"[skip-{phase}] {mint} score={score} flags={red_flags}")
+            print(
+                f"[skip-{phase}] {mint} score={score} birth={t.birth_signal_score:.0f} "
+                f"flags={red_flags}"
+            )
 
             can_rescan = (
                 self.cfg.enable_rescan
@@ -2190,18 +2485,23 @@ class HitAndRunScanner:
                 self.tokens.pop(mint, None)
             return
 
+        # ---------- LOLOS ----------
         if score >= self.cfg.min_conviction_score:
             signal = Signal(
                 mint=mint, score=score, entry_price=t.price,
                 reasons=reasons, red_flags=[], timestamp=now,
                 source=t.source, phase=phase,
+                birth_score=t.birth_signal_score,
             )
             t.signal_emitted = True
             self.signals.append(signal)
             self.logger.log_signal(signal, t)
             await self.signal_queue.put(signal)
-            print(f"[SIGNAL-{phase}] {mint} score={score} price={t.price:.8f}")
-            print(f"  reasons: {reasons}")
+            print(
+                f"[SIGNAL-{phase}] {mint} score={score} "
+                f"birth={t.birth_signal_score:.0f} price={t.price:.8f}"
+            )
+            print(f"  birth_signals: {t.birth_signals_passed}")
             if self.cfg.telegram_enabled:
                 await self.telegram.send_signal_alert(signal, t)
 
@@ -2331,7 +2631,7 @@ class HitAndRunScanner:
         pos = self.positions.open(signal, size_total * 0.3)
         print(
             f"[ENTRY-1] {signal.mint} 30% @ {signal.entry_price:.8f} "
-            f"stop={pos.stop_price:.8f}"
+            f"stop={pos.stop_price:.8f} birth_score={signal.birth_score:.0f}"
         )
 
     # --------------------------------------------------------
