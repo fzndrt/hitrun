@@ -25,6 +25,8 @@ import aiohttp
 import websockets
 import urllib.request
 from collections import defaultdict, deque
+import threading
+from flask import Flask, jsonify
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Set
 
@@ -1304,7 +1306,86 @@ class TelegramAlerter:
         except Exception as e:
             print(f"[telegram-error] {e}")
 
+# ============================================================
+# 10b. HEALTH SERVER (untuk Render Web Service)
+# ============================================================
 
+class HealthServer:
+    """
+    HTTP server minimal agar Render Web Service mendeteksi port terbuka
+    → deploy sukses <1 menit. Bonus: bisa monitoring via browser.
+    """
+
+    def __init__(self, scanner):
+        self.scanner = scanner
+        self.app = Flask(__name__)
+        self._register_routes()
+
+    def _register_routes(self):
+        @self.app.route("/")
+        def index():
+            return jsonify({
+                "service": "hitrun-scanner",
+                "version": "v7",
+                "ok": True,
+                "tokens_cached": len(self.scanner.tokens),
+                "signals_emitted": len(self.scanner.signals),
+                "positions_open": len(self.scanner.positions.positions),
+                "rescan_queue": len(self.scanner.rescan_heap),
+                "daily_exposure_usd": self.scanner.positions.daily_exposure,
+                "loss_streak": self.scanner.positions.daily_loss_streak,
+                "running": self.scanner.running,
+            })
+
+        @self.app.route("/healthz")
+        def healthz():
+            return "ok", 200
+
+        @self.app.route("/signals")
+        def signals():
+            return jsonify({
+                "count": len(self.scanner.signals),
+                "signals": [
+                    {
+                        "mint": s.mint,
+                        "score": s.score,
+                        "phase": s.phase,
+                        "source": s.source,
+                        "entry_price": s.entry_price,
+                        "ts": s.timestamp,
+                    }
+                    for s in self.scanner.signals[-50:]
+                ],
+            })
+
+        @self.app.route("/positions")
+        def positions():
+            return jsonify({
+                "count": len(self.scanner.positions.positions),
+                "positions": [
+                    {
+                        "mint": p.mint,
+                        "entry_price": p.entry_price,
+                        "size_usd": p.size_usd,
+                        "high_water": p.high_water,
+                        "stop_price": p.stop_price,
+                        "opened_at": p.opened_at,
+                    }
+                    for p in self.scanner.positions.positions.values()
+                ],
+            })
+
+    def run(self, port: int):
+        # use_reloader=False penting: kalau True, Flask spawn proses ganda
+        # dan scanner akan jalan 2x → duplikat alert!
+        self.app.run(
+            host="0.0.0.0",
+            port=port,
+            debug=False,
+            use_reloader=False,
+            threaded=True,
+        )
+        
 # ============================================================
 # 11. SCANNER UTAMA
 # ============================================================
@@ -1965,6 +2046,16 @@ async def backtest(csv_file: str, cfg: Config):
 async def main():
     cfg = Config()
     scanner = HitAndRunScanner(cfg)
+
+    # ---- HEALTH SERVER untuk Render Web Service ----
+    port = int(os.getenv("PORT", "10000"))
+    health = HealthServer(scanner)
+    health_thread = threading.Thread(
+        target=health.run, args=(port,), daemon=True
+    )
+    health_thread.start()
+    print(f"[web] health server listening on :{port}")
+    # ------------------------------------------------
 
     def handle_shutdown(signum, frame):
         print(f"[shutdown] signal {signum}, menutup scanner...")
