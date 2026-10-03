@@ -1,21 +1,17 @@
 # ============================================================
-# HITRUN.PY — Hit-and-Run Scanner v6 (FINAL)
+# HITRUN.PY — Hit-and-Run Scanner v7 (FINAL)
 # ============================================================
-# Tema: entry cepat (hit and run) TAPI aman dari rugpull.
-#
-# Kemampuan v6:
-#  - DETEKSI DUA FASE: pre-bonding & post-graduation (migrasi)
-#  - Migration listener via PumpPortal subscribeMigration
-#  - Post-migration evaluasi berbasis market cap (bukan bonding_pct)
-#  - Deteksi wallet split/cluster yang diperkuat:
-#       * funding graph (wallet didanai dari sumber sama)
-#       * pola saldo identik (bot farm)
-#       * wallet baru dibuat (fresh wallet)
-#       * cluster timing beli (beli di slot sama)
-#  - Security lengkap: authority, honeypot, transfer fee, metadata,
-#    creator reputation, LP lock, holder concentration
-#  - Telegram alert: hanya signal & exit (skip hanya log console)
-#  - Entry bertahap, exit disiplin, SIGTERM handler untuk Render
+# Fokus v7:
+#  - COVERAGE: multi-source discovery (PumpPortal WS + DexScreener poller
+#              + Raydium pools + boosts/profiles). ~250-400 koin/putaran.
+#  - POST-GRAD: jendela diperpanjang ke 6 jam. Fokus entry di awal,
+#               kejar koin yang baru graduate sebelum meledak.
+#  - BUYER QUALITY: toleransi buyer sepi ASAL bukan bot. Hitung bot-ratio
+#                   dari buyer (fresh wallet + micro balance + balance match).
+#  - PUMP.FUN TRAP: dev-sell check, migration sniper check, bonding progres.
+#  - SECURITY lengkap: authority, freeze, honeypot, tax, metadata,
+#                      creator rep, LP lock, cluster/funding graph.
+#  - Telegram: hanya signal & exit yang lolos filter.
 # ============================================================
 
 import asyncio
@@ -27,6 +23,7 @@ import signal
 import heapq
 import aiohttp
 import websockets
+import urllib.request
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Set
@@ -38,71 +35,88 @@ from typing import Dict, List, Optional, Tuple, Set
 
 @dataclass
 class Config:
-    # --- Jendela observasi ---
+    # --- Jendela observasi & rescan (DIPERPANJANG) ---
     observation_window_sec: int = 25
-    min_age_sec: int = 5
+    min_age_sec: int = 3
+    rescan_delay_sec: int = 30              # dari 60 → 30
+    max_rescan_count: int = 20              # dari 5 → 20
+    max_rescan_age_sec: int = 21600         # 15 menit → 6 JAM
 
-    # --- Filter harga (anti-pucuk) ---
-    max_price_pump_5m_pct: float = 50.0
-    min_price_pump_5m_pct: float = 3.0
+    # --- Filter harga ---
+    max_price_pump_5m_pct: float = 60.0
+    min_price_pump_5m_pct: float = 2.0
 
-    # --- Filter bonding curve (pre-graduation) ---
-    min_bonding_pct: float = 3.0
-    max_bonding_pct: float = 35.0
+    # --- Filter bonding curve ---
+    min_bonding_pct: float = 2.0
+    max_bonding_pct: float = 40.0
 
-    # --- Filter post-graduation (BARU) ---
+    # --- Post-graduation (DIPERPANJANG) ---
     enable_post_migration: bool = True
-    min_market_cap_usd: float = 30_000
-    max_market_cap_usd: float = 500_000
-    max_pool_age_minutes: int = 60
-    min_pool_liquidity_usd: float = 20_000
+    min_market_cap_usd: float = 15_000      # dari 30k → 15k
+    max_market_cap_usd: float = 5_000_000   # dari 500k → 5M
+    max_pool_age_minutes: int = 360         # 60 → 360 (6 jam)
+    min_pool_liquidity_usd: float = 8_000   # dari 20k → 8k
+    enable_post_migration_rescan: bool = True
 
-    # --- Filter likuiditas & holder ---
-    min_liquidity_usd: float = 15_000.0
-    max_top10_holder_pct: float = 25.0
-    max_top1_holder_pct: float = 3.0
+    # --- Likuiditas & holder (DILONGGARKAN) ---
+    min_liquidity_usd: float = 5_000        # dari 15k → 5k
+    max_top10_holder_pct: float = 28.0
+    max_top1_holder_pct: float = 4.0
     max_dev_holding_pct: float = 5.0
-    min_holders_count: int = 50
+    min_holders_count: int = 10             # dari 50 → 10
     require_lp_locked: bool = True
-    min_lp_locked_pct: float = 95.0
-    max_rugcheck_score: float = 60.0
+    min_lp_locked_pct: float = 90.0
+    max_rugcheck_score: float = 65.0
 
-    # --- Authority & metadata ---
+    # --- Authority & metadata (WAJIB) ---
     require_mint_authority_revoked: bool = True
     require_freeze_authority_revoked: bool = True
-    require_metadata_immutable: bool = True
+    require_metadata_immutable: bool = False  # longgarkan, banyak koin pakai mutable
 
-    # --- Transfer fee / sell tax ---
-    max_transfer_fee_pct: float = 3.0
-    max_buy_tax_pct: float = 5.0
+    # --- Tax / fee ---
+    max_transfer_fee_pct: float = 5.0
+    max_buy_tax_pct: float = 8.0
 
-    # --- Sell simulation / honeypot ---
+    # --- Sell simulation ---
     enable_sell_simulation: bool = True
-    min_sell_recovery_pct: float = 70.0
+    min_sell_recovery_pct: float = 60.0
 
     # --- Creator reputation ---
     max_creator_rugpull_count: int = 0
-    max_creator_token_count: int = 5
 
-    # --- Top holder pattern / bot farm ---
-    max_micro_wallet_count: int = 20
+    # --- Micro wallet / bot farm ---
+    max_micro_wallet_count: int = 25
     micro_wallet_balance_sol: float = 0.02
 
-    # --- Wallet split / cluster (BARU) ---
-    enable_wallet_cluster_check: bool = True
-    fresh_wallet_max_age_hours: int = 24       # wallet dibuat < 24 jam = fresh
-    max_fresh_wallet_ratio: float = 0.5        # max 50% top holder fresh
-    balance_similarity_tolerance: float = 0.1  # ±10% dianggap mirip
-    min_similar_balance_wallets: int = 5       # min wallet untuk dianggap bot farm
-    max_similar_balance_wallets: int = 10      # >10 wallet mirip = tolak
+    # --- BUYER QUALITY (BARU — pengganti filter "unique buyers") ---
+    enable_buyer_quality_check: bool = True
+    min_real_buyers: int = 3                # minimal 3 buyer ASLI
+    max_bot_ratio: float = 0.6              # max 60% bot dari buyer
+    buyer_age_threshold_hours: float = 24.0
+    buyer_balance_min_sol: float = 0.05     # di bawah ini = micro/bot
+    max_early_buyers_check: int = 30        # analisa 30 buyer pertama
 
-    # --- Filter bundle & sniper ---
-    max_bundle_wallets: int = 3
-    max_sniper_wallets: int = 5
+    # --- Wallet cluster ---
+    enable_wallet_cluster_check: bool = True
+    fresh_wallet_max_age_hours: int = 24
+    max_fresh_wallet_ratio: float = 0.6
+    balance_similarity_tolerance: float = 0.1
+    min_similar_balance_wallets: int = 5
+    max_similar_balance_wallets: int = 12
+
+    # --- Bundle & sniper ---
+    max_bundle_wallets: int = 4
+    max_sniper_wallets: int = 8
     sniper_window_sec: int = 10
 
+    # --- PUMP.FUN TRAP (BARU) ---
+    enable_dev_sell_check: bool = True
+    enable_migration_sniper_check: bool = True
+    max_dev_sell_pct: float = 0.0           # dev tidak boleh jual sama sekali
+    max_migration_snipers: int = 5
+
     # --- Skor minimum ---
-    min_conviction_score: float = 65.0
+    min_conviction_score: float = 60.0      # dari 65 → 60
 
     # --- Manajemen posisi ---
     position_size_pct: float = 2.5
@@ -122,6 +136,12 @@ class Config:
     enable_raydium: bool = False
     enable_meteora: bool = False
 
+    # --- DEXSCREENER DISCOVERY (BARU — memperluas coverage) ---
+    enable_dexscreener_discovery: bool = True
+    discovery_interval_sec: int = 30
+    discovery_queries: Tuple[str, ...] = ("SOL", "PUMP", "RAY", "METEORA", "USDC")
+    discovery_max_per_query: int = 40
+
     # --- Endpoint GRATIS ---
     threews_api_url: str = "https://three.ws/api/crypto"
     holder_rpc_url: str = "https://rpc.magicblock.app/mainnet"
@@ -129,32 +149,35 @@ class Config:
     rugcheck_url: str = "https://api.rugcheck.xyz/v1"
     jupiter_quote_url: str = "https://lite-api.jup.ag/swap/v1/quote"
     dexscreener_url: str = "https://api.dexscreener.com/latest/dex/tokens"
+    dexscreener_search_url: str = "https://api.dexscreener.com/latest/dex/search"
+    dexscreener_boosts_latest: str = "https://api.dexscreener.com/token-boosts/latest/v1"
+    dexscreener_boosts_top: str = "https://api.dexscreener.com/token-boosts/top/v1"
+    dexscreener_profiles: str = "https://api.dexscreener.com/token-profiles/latest/v1"
+    raydium_pools_url: str = (
+        "https://api-v3.raydium.io/pools/info/list?"
+        "poolType=all&poolSortField=default&sortType=desc&pageSize=30&page=1"
+    )
 
     # --- Worker & cache ---
-    worker_count: int = 8
-    rpc_semaphore: int = 12
+    worker_count: int = 16                  # dari 8 → 16 (coverage lebih besar)
+    rpc_semaphore: int = 16
     evaluate_interval_sec: float = 1.0
     monitor_interval_sec: float = 2.0
     cache_ttl_holders_sec: int = 15
     cache_ttl_lp_sec: int = 30
     cache_ttl_supply_sec: int = 60
-    cache_ttl_security_sec: int = 30
-    cache_ttl_wallet_age_sec: int = 300
+    cache_ttl_security_sec: int = 45
+    cache_ttl_wallet_age_sec: int = 600
+    cache_ttl_buyer_quality_sec: int = 120
 
     # --- Funding graph ---
     funding_window_hours: int = 72
     max_cluster_pct: float = 30.0
-    max_cluster_size: int = 5
-    max_clustered_wallets: int = 10
+    max_cluster_size: int = 6
+    max_clustered_wallets: int = 12
     max_clusters: int = 3
 
-    # --- Rescan ---
-    enable_rescan: bool = True
-    rescan_delay_sec: int = 60
-    max_rescan_count: int = 5
-    max_rescan_age_sec: int = 900
-
-    # --- Telegram alert ---
+    # --- Telegram ---
     telegram_bot_token: str = field(
         default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", "")
     )
@@ -198,7 +221,7 @@ class TokenState:
     scored: bool = False
     signal_emitted: bool = False
 
-    # Security fields
+    # Security
     mint_authority_active: bool = False
     freeze_authority_active: bool = False
     metadata_mutable: bool = False
@@ -207,18 +230,27 @@ class TokenState:
     creator_rugpull_count: int = 0
     micro_wallet_count: int = 0
 
-    # Wallet cluster (BARU)
+    # Buyer quality (BARU)
+    real_buyers: int = 0
+    bot_buyers: int = 0
+    bot_ratio: float = 0.0
+
+    # Cluster
     fresh_wallet_count: int = 0
     fresh_wallet_ratio: float = 0.0
     similar_balance_wallets: int = 0
     cluster_pct: float = 0.0
 
-    # Post-migration (BARU)
+    # Post-migration
     is_migrated: bool = False
     pool_address: str = ""
     market_cap_usd: float = 0.0
     pool_age_minutes: float = 0.0
     migration_detected_at: float = 0.0
+    migration_snipers: int = 0
+
+    # Pump.fun trap
+    dev_sold_pct: float = 0.0
 
     # Rescan
     rescan_count: int = 0
@@ -234,7 +266,7 @@ class Signal:
     red_flags: List[str]
     timestamp: float
     source: str = ""
-    phase: str = "bonding"  # "bonding" atau "post_migration"
+    phase: str = "bonding"
 
 
 @dataclass
@@ -251,7 +283,7 @@ class Position:
 
 
 # ============================================================
-# 3. CACHE LAYER
+# 3. CACHE
 # ============================================================
 
 class TimedCache:
@@ -309,7 +341,6 @@ class RpcClient:
             holders = await self._holders_rpc(mint, self.cfg.holder_rpc_url)
         if not holders:
             holders = await self._holders_rpc(mint, self.cfg.public_rpc_url)
-
         if holders:
             self.cache.set(f"holders:{mint}", holders)
         return holders
@@ -353,7 +384,6 @@ class RpcClient:
         accounts = data.get("result", {}).get("value", []) or []
         if not accounts:
             return {}
-
         supply = await self._get_supply(mint, rpc_url)
         if supply <= 0:
             return {}
@@ -370,7 +400,6 @@ class RpcClient:
         cached = self.cache.get(f"supply:{mint}", self.cfg.cache_ttl_supply_sec)
         if cached is not None:
             return cached
-
         payload = {
             "jsonrpc": "2.0", "id": "1",
             "method": "getTokenSupply",
@@ -386,13 +415,9 @@ class RpcClient:
         self.cache.set(f"supply:{mint}", supply)
         return supply
 
-    # ---------- WALLET ANALYSIS (BARU) ----------
+    # ---------- WALLET ----------
 
     async def get_wallet_age_hours(self, wallet: str) -> float:
-        """
-        Estimasi umur wallet dari signature paling awal.
-        Return: umur dalam jam (999 jika gagal/tidak ada sig).
-        """
         cached = self.cache.get(f"wage:{wallet}", self.cfg.cache_ttl_wallet_age_sec)
         if cached is not None:
             return cached
@@ -415,16 +440,16 @@ class RpcClient:
                     earliest = min(
                         (s.get("blockTime", 0) or 0) for s in sigs
                     )
-                    if earliest <= 0:
-                        age = 999.0
-                    else:
-                        age = (time.time() - earliest) / 3600.0
+                    age = (time.time() - earliest) / 3600.0 if earliest > 0 else 999.0
             except Exception:
                 age = 999.0
         self.cache.set(f"wage:{wallet}", age)
         return age
 
     async def get_wallet_balance_sol(self, wallet: str) -> float:
+        cached = self.cache.get(f"wbal:{wallet}", 300)
+        if cached is not None:
+            return cached
         payload = {
             "jsonrpc": "2.0", "id": "1",
             "method": "getBalance",
@@ -437,9 +462,11 @@ class RpcClient:
                 ) as resp:
                     data = await resp.json()
                 lamports = data.get("result", {}).get("value", 0)
-                return lamports / 1_000_000_000
+                bal = lamports / 1_000_000_000
             except Exception:
-                return 999.0
+                bal = 999.0
+        self.cache.set(f"wbal:{wallet}", bal)
+        return bal
 
     async def get_signatures(self, address: str, limit: int = 50) -> list:
         payload = {
@@ -549,9 +576,7 @@ class RpcClient:
         balances = await asyncio.gather(
             *[self.get_wallet_balance_sol(w) for w in top_wallets]
         )
-        return sum(
-            1 for b in balances if b < self.cfg.micro_wallet_balance_sol
-        )
+        return sum(1 for b in balances if b < self.cfg.micro_wallet_balance_sol)
 
     async def simulate_sell(self, mint: str, amount_raw: int = 1_000_000) -> bool:
         if not self.cfg.enable_sell_simulation:
@@ -573,7 +598,107 @@ class RpcClient:
             except Exception:
                 return True
 
-    # ---------- LP & RISK ----------
+    # ---------- BUYER QUALITY (BARU) ----------
+
+    async def analyze_buyer_quality(
+        self, buyers: List[dict]
+    ) -> Tuple[int, int, float]:
+        """
+        Analisa buyer awal: berapa bot, berapa asli.
+        Bot = (wallet age < threshold) OR (balance < threshold).
+        Return: (real_count, bot_count, bot_ratio)
+        """
+        cached = self.cache.get(
+            f"bq:{id(buyers)}", self.cfg.cache_ttl_buyer_quality_sec
+        )
+        if cached is not None:
+            return cached
+
+        if not buyers:
+            return 0, 0, 0.0
+
+        # Ambil unique wallets, limit N
+        wallets: List[str] = []
+        seen: Set[str] = set()
+        for b in buyers:
+            w = b.get("wallet", "")
+            if w and w not in seen:
+                seen.add(w)
+                wallets.append(w)
+            if len(wallets) >= self.cfg.max_early_buyers_check:
+                break
+
+        if not wallets:
+            return 0, 0, 0.0
+
+        ages, balances = await asyncio.gather(
+            asyncio.gather(*[self.get_wallet_age_hours(w) for w in wallets]),
+            asyncio.gather(*[self.get_wallet_balance_sol(w) for w in wallets]),
+        )
+
+        bot_count = 0
+        for age, bal in zip(ages, balances):
+            is_fresh = age < self.cfg.buyer_age_threshold_hours
+            is_micro = bal < self.cfg.buyer_balance_min_sol
+            if is_fresh or is_micro:
+                bot_count += 1
+
+        real_count = len(wallets) - bot_count
+        bot_ratio = bot_count / len(wallets) if wallets else 0.0
+        result = (real_count, bot_count, bot_ratio)
+        self.cache.set(f"bq:{id(buyers)}", result)
+        return result
+
+    # ---------- PUMP.FUN TRAP (BARU) ----------
+
+    async def check_dev_sold(
+        self, mint: str, creator: str, created_at: float
+    ) -> float:
+        """
+        Cek apakah dev sudah menjual token.
+        Return: persentase dari supply awal yang dijual dev (estimasi).
+        """
+        if not self.cfg.enable_dev_sell_check or not creator:
+            return 0.0
+
+        cached = self.cache.get(f"devsell:{mint}", 60)
+        if cached is not None:
+            return cached
+
+        sigs = await self.get_signatures(creator, limit=30)
+        sold_pct = 0.0
+        # Heuristik: kalau ada signature setelah create dengan jenis sell
+        # dari wallet dev, anggap dev sudah jual sebagian.
+        for s in sigs:
+            bt = s.get("blockTime", 0) or 0
+            if bt < created_at:
+                continue
+            # Cek tx untuk melihat jika token keluar dari dev wallet
+            tx = await self.get_transaction(s["signature"])
+            if not tx or not tx.get("meta"):
+                continue
+            try:
+                pre = tx["meta"].get("preTokenBalances", []) or []
+                post = tx["meta"].get("postTokenBalances", []) or []
+                # Cari entry untuk mint ini di owner = creator
+                pre_amt = 0.0
+                post_amt = 0.0
+                for pb in pre:
+                    if pb.get("mint") == mint and pb.get("owner") == creator:
+                        pre_amt = float(pb.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
+                for pb in post:
+                    if pb.get("mint") == mint and pb.get("owner") == creator:
+                        post_amt = float(pb.get("uiTokenAmount", {}).get("uiAmount", 0) or 0)
+                if pre_amt > post_amt:
+                    sold_pct += (pre_amt - post_amt) / max(pre_amt, 1.0) * 100
+            except Exception:
+                continue
+
+        sold_pct = min(100.0, sold_pct)
+        self.cache.set(f"devsell:{mint}", sold_pct)
+        return sold_pct
+
+    # ---------- LP & POOL ----------
 
     async def get_lp_info(
         self, mint: str
@@ -620,14 +745,7 @@ class RpcClient:
         self.cache.set(f"lp:{mint}", result)
         return result
 
-    # ---------- POOL DATA (post-migration) ----------
-
     async def get_pool_data(self, mint: str) -> dict:
-        """
-        Ambil data pool dari DexScreener untuk mode post-migration.
-        Return: {'market_cap': float, 'liquidity_usd': float,
-                 'pool_address': str, 'pool_age_min': float, 'price': float}
-        """
         cached = self.cache.get(f"pool:{mint}", 30)
         if cached is not None:
             return cached
@@ -652,7 +770,6 @@ class RpcClient:
             self.cache.set(f"pool:{mint}", empty)
             return empty
 
-        # Pilih pair dengan liquidity tertinggi
         best = max(
             pairs,
             key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0),
@@ -663,6 +780,9 @@ class RpcClient:
             "pool_address": best.get("pairAddress", ""),
             "price": float(best.get("priceUsd", 0) or 0),
             "created_at": float(best.get("pairCreatedAt", 0) or 0) / 1000.0,
+            "buys_m5": int(best.get("txns", {}).get("m5", {}).get("buys", 0)),
+            "buys_h1": int(best.get("txns", {}).get("h1", {}).get("buys", 0)),
+            "vol_h1": float(best.get("volume", {}).get("h1", 0) or 0),
         }
         self.cache.set(f"pool:{mint}", result)
         return result
@@ -682,7 +802,6 @@ class SecurityAnalyzer:
         by_slot = defaultdict(list)
         for b in early_buys:
             by_slot[b["slot"]].append(b)
-
         bundled: List[str] = []
         for slot, trades in by_slot.items():
             if len(trades) < self.cfg.max_bundle_wallets:
@@ -705,6 +824,18 @@ class SecurityAnalyzer:
         ]
         return len(set(snipers)), list(set(snipers))
 
+    def detect_migration_snipers(
+        self, buyers: List[dict], migration_time: float
+    ) -> int:
+        """Hitung buyer yang masuk dalam 10 detik setelah migrasi."""
+        if migration_time <= 0:
+            return 0
+        snipers = [
+            b["wallet"] for b in buyers
+            if 0 <= (b["timestamp"] - migration_time) <= 10
+        ]
+        return len(set(snipers))
+
     def holder_concentration(
         self, holders: Dict[str, float], lp_pool: str
     ) -> Tuple[float, float, float]:
@@ -716,18 +847,10 @@ class SecurityAnalyzer:
 
 
 # ============================================================
-# 6. WALLET CLUSTER ANALYZER (BARU — diperkuat)
+# 6. WALLET CLUSTER ANALYZER
 # ============================================================
 
 class WalletClusterAnalyzer:
-    """
-    Deteksi wallet yang dipecah / dikuasai satu orang:
-      1. Funding graph: wallet didanai dari wallet induk sama
-      2. Balance similarity: banyak wallet dengan saldo mirip (bot farm)
-      3. Fresh wallet ratio: proporsi wallet baru dibuat
-      4. Timing cluster: beli di slot/blok berdekatan
-    """
-
     KNOWN_EXCHANGES = {
         "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
         "2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S",
@@ -741,7 +864,7 @@ class WalletClusterAnalyzer:
     async def find_funder(
         self, wallet: str, window_start: float, window_end: float
     ) -> Optional[str]:
-        sigs = await self.rpc.get_signatures(wallet, limit=50)
+        sigs = await self.rpc.get_signatures(wallet, limit=30)
         for s in sigs:
             block_time = s.get("blockTime", 0)
             if not block_time or block_time > window_end:
@@ -775,7 +898,7 @@ class WalletClusterAnalyzer:
         if not self.cfg.enable_wallet_cluster_check:
             return {}
         funder_map: Dict[str, List[str]] = defaultdict(list)
-        for w in wallets:
+        for w in wallets[:15]:
             if w in self.KNOWN_EXCHANGES:
                 continue
             funder = await self.find_funder(w, window_start, window_end)
@@ -786,10 +909,6 @@ class WalletClusterAnalyzer:
     async def detect_fresh_wallets(
         self, holders: Dict[str, float]
     ) -> Tuple[int, float]:
-        """
-        Hitung jumlah & rasio wallet fresh (baru dibuat < N jam).
-        Batasi 20 top holder agar cepat.
-        """
         top = list(holders.keys())[:20]
         if not top:
             return 0, 0.0
@@ -799,13 +918,7 @@ class WalletClusterAnalyzer:
         fresh = sum(1 for a in ages if a < self.cfg.fresh_wallet_max_age_hours)
         return fresh, fresh / len(top)
 
-    async def detect_balance_pattern(
-        self, holders: Dict[str, float]
-    ) -> int:
-        """
-        Deteksi bot farm: wallet dengan saldo SOL hampir identik.
-        Return: jumlah wallet dalam cluster saldo terbesar.
-        """
+    async def detect_balance_pattern(self, holders: Dict[str, float]) -> int:
         if not self.cfg.enable_wallet_cluster_check:
             return 0
         top = list(holders.keys())[:20]
@@ -814,19 +927,14 @@ class WalletClusterAnalyzer:
         balances = await asyncio.gather(
             *[self.rpc.get_wallet_balance_sol(w) for w in top]
         )
-        # Kelompokkan saldo mirip
         tol = self.cfg.balance_similarity_tolerance
         groups: Dict[float, int] = defaultdict(int)
         for b in balances:
             if b <= 0 or b >= 999:
                 continue
-            # Bulatkan untuk grouping
-            key = round(b, 3)
-            groups[key] += 1
-        # Cari grup terbesar
+            groups[round(b, 3)] += 1
         if not groups:
             return 0
-        # Merge grup yang mirip
         keys = sorted(groups.keys())
         largest = 0
         for i, k in enumerate(keys):
@@ -861,15 +969,10 @@ class WalletClusterAnalyzer:
             red_flags.append(f"clustered_wallets:{total_clustered}")
         if len(clusters) >= self.cfg.max_clusters:
             red_flags.append(f"multiple_clusters:{len(clusters)}")
-
-        # Fresh wallet
         if fresh_ratio > self.cfg.max_fresh_wallet_ratio:
             red_flags.append(f"fresh_wallets:{fresh_count}({fresh_ratio:.0%})")
-
-        # Balance pattern
         if similar_balance > self.cfg.max_similar_balance_wallets:
             red_flags.append(f"similar_balance_wallets:{similar_balance}")
-
         return round(score, 2), red_flags
 
 
@@ -882,12 +985,11 @@ class FastScorer:
         self.cfg = cfg
 
     def score_bonding(self, t: TokenState) -> Tuple[float, List[str], List[str]]:
-        """Skor untuk fase pre-bonding."""
         reasons: List[str] = []
         red_flags: List[str] = []
         score = 0.0
 
-        # Momentum (max 30)
+        # Momentum (max 25)
         if t.price_at_5m_ago > 0:
             pump_pct = (t.price - t.price_at_5m_ago) / t.price_at_5m_ago * 100
         else:
@@ -895,47 +997,47 @@ class FastScorer:
         if pump_pct > self.cfg.max_price_pump_5m_pct:
             red_flags.append(f"price_pump_too_high:{pump_pct:.1f}%")
         elif pump_pct >= self.cfg.min_price_pump_5m_pct:
-            score += min(30, pump_pct)
-            reasons.append(f"healthy_momentum:{pump_pct:.1f}%")
+            score += min(25, pump_pct)
+            reasons.append(f"momentum:{pump_pct:.1f}%")
 
         # Buy pressure (max 25)
         total_vol = t.volume_buys + t.volume_sells
         if total_vol > 0:
             buy_ratio = t.volume_buys / total_vol
             score += buy_ratio * 25
-            if buy_ratio > 0.65:
+            if buy_ratio > 0.6:
                 reasons.append(f"buy_pressure:{buy_ratio:.2f}")
-            elif buy_ratio < 0.4:
+            elif buy_ratio < 0.35:
                 red_flags.append(f"sell_pressure:{buy_ratio:.2f}")
 
-        # Unique buyers (max 20)
-        ub = len(t.unique_buyers)
-        if ub >= 10:
-            score += 20
-            reasons.append(f"unique_buyers:{ub}")
-        elif ub >= 5:
-            score += 12
-        else:
-            red_flags.append(f"few_unique_buyers:{ub}")
+        # BUYER QUALITY (max 30) — ganti "unique buyers"
+        if self.cfg.enable_buyer_quality_check:
+            if t.real_buyers >= self.cfg.min_real_buyers:
+                score += 30
+                reasons.append(f"real_buyers:{t.real_buyers}")
+            elif t.real_buyers >= 1:
+                score += 15
+                reasons.append(f"few_real_buyers:{t.real_buyers}")
+            else:
+                red_flags.append(f"no_real_buyers")
+            if t.bot_ratio > self.cfg.max_bot_ratio:
+                red_flags.append(f"bot_dominated:{t.bot_ratio:.0%}")
 
-        # Bonding curve (max 15)
+        # Bonding (max 15)
         if self.cfg.min_bonding_pct <= t.bonding_pct <= self.cfg.max_bonding_pct:
             score += 15
             reasons.append(f"bonding_ok:{t.bonding_pct:.1f}%")
-        else:
+        elif t.bonding_pct > 0:
             red_flags.append(f"bonding_bad:{t.bonding_pct:.1f}%")
 
-        # Likuiditas (max 10)
+        # Likuiditas (max 5)
         if t.liquidity_usd >= self.cfg.min_liquidity_usd:
-            score += 10
-            reasons.append(f"liquidity_ok:${t.liquidity_usd:,.0f}")
-        else:
-            red_flags.append(f"low_liquidity:${t.liquidity_usd:,.0f}")
+            score += 5
+            reasons.append(f"liq_ok:${t.liquidity_usd:,.0f}")
 
         return round(score, 2), reasons, red_flags
 
     def score_post_migration(self, t: TokenState) -> Tuple[float, List[str], List[str]]:
-        """Skor untuk fase post-graduation (berbasis market cap & liquidity)."""
         reasons: List[str] = []
         red_flags: List[str] = []
         score = 0.0
@@ -945,19 +1047,19 @@ class FastScorer:
             score += 25
             reasons.append(f"mcap_ok:${t.market_cap_usd:,.0f}")
         else:
-            red_flags.append(f"mcap_out_of_range:${t.market_cap_usd:,.0f}")
+            red_flags.append(f"mcap_out:${t.market_cap_usd:,.0f}")
 
-        # Pool age (max 15) — pool baru = momentum masih segar
+        # Pool age (max 20) — pool baru/muda = momentum segar
         if t.pool_age_minutes <= self.cfg.max_pool_age_minutes:
-            score += 15
-            reasons.append(f"pool_age_ok:{t.pool_age_minutes:.0f}min")
+            score += 20
+            reasons.append(f"pool_age:{t.pool_age_minutes:.0f}min")
         else:
             red_flags.append(f"pool_too_old:{t.pool_age_minutes:.0f}min")
 
         # Liquidity (max 20)
         if t.liquidity_usd >= self.cfg.min_pool_liquidity_usd:
             score += 20
-            reasons.append(f"pool_liquidity_ok:${t.liquidity_usd:,.0f}")
+            reasons.append(f"pool_liq:${t.liquidity_usd:,.0f}")
         else:
             red_flags.append(f"pool_liq_low:${t.liquidity_usd:,.0f}")
 
@@ -966,29 +1068,27 @@ class FastScorer:
         if total_vol > 0:
             buy_ratio = t.volume_buys / total_vol
             score += buy_ratio * 20
-            if buy_ratio > 0.6:
+            if buy_ratio > 0.55:
                 reasons.append(f"buy_pressure:{buy_ratio:.2f}")
-            elif buy_ratio < 0.4:
-                red_flags.append(f"sell_pressure:{buy_ratio:.2f}")
 
         # Holder count (max 10)
-        holder_count = len(t.holders)
-        if holder_count >= 200:
+        hc = len(t.holders)
+        if hc >= 200:
             score += 10
-            reasons.append(f"holders_ok:{holder_count}")
-        elif holder_count >= 100:
-            score += 5
+            reasons.append(f"holders:{hc}")
+        elif hc >= 50:
+            score += 6
+        elif hc >= 20:
+            score += 3
         else:
-            red_flags.append(f"few_holders:{holder_count}")
+            red_flags.append(f"few_holders:{hc}")
 
-        # Price momentum (max 10)
+        # Momentum (max 5)
         if t.price_at_5m_ago > 0:
             pump_pct = (t.price - t.price_at_5m_ago) / t.price_at_5m_ago * 100
-            if 3 <= pump_pct <= self.cfg.max_price_pump_5m_pct:
-                score += 10
+            if 2 <= pump_pct <= self.cfg.max_price_pump_5m_pct:
+                score += 5
                 reasons.append(f"momentum:{pump_pct:.1f}%")
-            elif pump_pct > self.cfg.max_price_pump_5m_pct:
-                red_flags.append(f"price_pump_too_high:{pump_pct:.1f}%")
 
         return round(score, 2), reasons, red_flags
 
@@ -1030,31 +1130,24 @@ class PositionManager:
         pos = self.positions.get(mint)
         if not pos:
             return actions
-
         if price > pos.high_water:
             pos.high_water = price
-
         new_trailing = pos.high_water * (1 - self.cfg.trailing_stop_pct / 100)
         if new_trailing > pos.trailing_price:
             pos.trailing_price = new_trailing
-
         if price <= pos.stop_price:
             actions.append("stop_loss")
             return actions
-
         if (
             not pos.initial_recovered
             and price >= pos.entry_price * self.cfg.take_initials_multiple
         ):
             actions.append("take_initials")
             pos.initial_recovered = True
-
         if pos.initial_recovered and price <= pos.trailing_price:
             actions.append("trailing")
-
         if (time.time() - pos.opened_at) > self.cfg.time_stop_hours * 3600:
             actions.append("time_stop")
-
         return actions
 
     def close(self, mint: str, pnl_usd: float):
@@ -1086,28 +1179,16 @@ class TradeLogger:
             "bonding_pct": token.bonding_pct,
             "mcap": token.market_cap_usd,
             "liquidity": token.liquidity_usd,
-            "unique_buyers": len(token.unique_buyers),
-            "mint_authority": token.mint_authority_active,
-            "freeze_authority": token.freeze_authority_active,
-            "metadata_mutable": token.metadata_mutable,
-            "transfer_fee": token.transfer_fee_pct,
-            "sell_sim_ok": token.sell_simulation_ok,
-            "creator_rugpull": token.creator_rugpull_count,
-            "micro_wallets": token.micro_wallet_count,
-            "fresh_wallets": token.fresh_wallet_count,
-            "fresh_ratio": token.fresh_wallet_ratio,
-            "similar_balance": token.similar_balance_wallets,
-            "cluster_pct": token.cluster_pct,
+            "real_buyers": token.real_buyers,
+            "bot_ratio": token.bot_ratio,
+            "dev_sold_pct": token.dev_sold_pct,
+            "migration_snipers": token.migration_snipers,
         })
 
     def log_exit(self, mint: str, price: float, reason: str, pnl_pct: float):
         self._append({
-            "type": "exit",
-            "ts": time.time(),
-            "mint": mint,
-            "price": price,
-            "reason": reason,
-            "pnl_pct": pnl_pct,
+            "type": "exit", "ts": time.time(), "mint": mint,
+            "price": price, "reason": reason, "pnl_pct": pnl_pct,
         })
 
     def _append(self, entry: dict):
@@ -1134,7 +1215,7 @@ class TelegramAlerter:
             print("[telegram] token/chat_id kosong, alert dinonaktifkan")
             return
         self.session = aiohttp.ClientSession()
-        await self._send("✅ <b>[HIT-AND-RUN] scanner online (v6)</b>")
+        await self._send("✅ <b>[HIT-AND-RUN] scanner v7 online</b>")
 
     async def close(self):
         if self.session:
@@ -1153,20 +1234,23 @@ class TelegramAlerter:
             + (
                 f"<b>Bonding:</b> {token.bonding_pct:.1f}%\n"
                 if signal.phase == "bonding"
-                else f"<b>Market Cap:</b> ${token.market_cap_usd:,.0f}\n"
+                else f"<b>MCap:</b> ${token.market_cap_usd:,.0f}\n"
                      f"<b>Pool Age:</b> {token.pool_age_minutes:.0f} min\n"
             ) +
             f"<b>Liquidity:</b> ${token.liquidity_usd:,.0f}\n"
             f"<b>Holders:</b> {len(token.holders)}\n"
-            f"<b>Unique Buyers:</b> {len(token.unique_buyers)}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Buyer Quality:</b>\n"
+            f"  Real Buyers: {token.real_buyers}\n"
+            f"  Bot Ratio: {token.bot_ratio:.0%}\n"
             f"<b>Keamanan:</b>\n"
             f"  Mint Auth: {'❌' if token.mint_authority_active else '✅'}\n"
             f"  Freeze Auth: {'❌' if token.freeze_authority_active else '✅'}\n"
-            f"  Metadata: {'❌ mutable' if token.metadata_mutable else '✅ immutable'}\n"
+            f"  Metadata: {'⚠️ mutable' if token.metadata_mutable else '✅ immutable'}\n"
             f"  Sell Tax: {token.transfer_fee_pct:.1f}%\n"
             f"  Honeypot: {'❌' if not token.sell_simulation_ok else '✅'}\n"
             f"  LP Lock: {'✅' if token.lp_locked else '❌'}\n"
+            f"  Dev Sold: {token.dev_sold_pct:.1f}%\n"
             f"  Fresh Wallets: {token.fresh_wallet_count} ({token.fresh_wallet_ratio:.0%})\n"
             f"  Similar Balance: {token.similar_balance_wallets}\n"
             f"  Cluster: {token.cluster_pct:.0f}%\n"
@@ -1186,14 +1270,14 @@ class TelegramAlerter:
         self, mint: str, price: float, reason: str, pnl_pct: float
     ):
         emoji = "🟢" if pnl_pct > 0 else "🔴"
-        reason_label = {
+        label = {
             "stop_loss": "🛑 STOP LOSS",
             "take_initials": "💰 TAKE INITIALS (50%)",
             "trailing": "📉 TRAILING STOP",
             "time_stop": "⏰ TIME STOP",
         }.get(reason, reason)
         text = (
-            f"{emoji} <b>[HIT-AND-RUN] EXIT — {reason_label}</b>\n"
+            f"{emoji} <b>[HIT-AND-RUN] EXIT — {label}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<b>Token:</b> <code>{mint}</code>\n"
             f"<b>Exit Price:</b> <code>{price:.8f}</code>\n"
@@ -1216,7 +1300,7 @@ class TelegramAlerter:
             async with self.session.post(url, json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    print(f"[telegram-error] status={resp.status} body={body[:200]}")
+                    print(f"[telegram-error] {resp.status} {body[:200]}")
         except Exception as e:
             print(f"[telegram-error] {e}")
 
@@ -1241,7 +1325,7 @@ class HitAndRunScanner:
         self.cluster_analyzer = WalletClusterAnalyzer(cfg, self.rpc)
 
         self.tokens: Dict[str, TokenState] = {}
-        self.price_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
+        self.price_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=600))
         self.buyers_buffer: Dict[str, List[dict]] = defaultdict(list)
         self.signals: List[Signal] = []
 
@@ -1253,7 +1337,7 @@ class HitAndRunScanner:
         self.running = True
 
     # --------------------------------------------------------
-    # 11.1 INGESTION — PumpPortal (new token + migration)
+    # 11.1 INGESTION — PumpPortal
     # --------------------------------------------------------
 
     async def pumpportal_listener(self):
@@ -1262,7 +1346,7 @@ class HitAndRunScanner:
                 async with websockets.connect(self.cfg.pumpportal_ws) as ws:
                     await ws.send(json.dumps({"method": "subscribeNewToken"}))
                     await ws.send(json.dumps({"method": "subscribeMigration"}))
-                    print("[ws:pumpfun] connected (new token + migration)")
+                    print("[ws:pumpfun] connected")
                     async for raw in ws:
                         if not self.running:
                             break
@@ -1281,141 +1365,164 @@ class HitAndRunScanner:
             mint = msg["mint"]
             if mint in self.tokens:
                 return
+            v_sol = float(msg.get("vSolInBondingCurve", 0) or 0)
+            bonding_pct = min(100.0, (v_sol / 85.0) * 100) if v_sol > 0 else 0.0
             self.tokens[mint] = TokenState(
                 mint=mint,
                 creator=msg.get("traderPublicKey", ""),
                 source="pumpfun",
                 created_at=time.time(),
                 price=float(msg.get("initialBuy", 0) or 0),
+                bonding_pct=bonding_pct,
+                liquidity_usd=max(0.0, v_sol * 150),
             )
             await self.eval_queue.put(mint)
-            print(f"[new] {mint} (pumpfun)")
-
+            print(f"[new] {mint} (pumpfun, bonding={bonding_pct:.1f}%)")
         elif tx_type == "migrate":
             await self.handle_migration(msg)
-
         elif tx_type in ("buy", "sell"):
             await self.handle_trade(msg, source="pumpfun")
 
     async def handle_migration(self, msg: dict):
-        """
-        Token lulus bonding curve, pindah ke AMM (PumpSwap/Raydium).
-        """
         mint = msg.get("mint")
         if not mint:
             return
         now = time.time()
-
         if mint not in self.tokens:
-            # Kita melewatkan fase bonding, buat TokenState baru
             self.tokens[mint] = TokenState(
                 mint=mint,
                 creator=msg.get("traderPublicKey", ""),
                 source="pumpfun",
                 created_at=now,
             )
-
         t = self.tokens[mint]
         t.is_migrated = True
         t.pool_address = msg.get("pool", "") or msg.get("poolAddress", "")
         t.migration_detected_at = now
-        # Reset agar dievaluasi ulang dalam mode post-migration
         t.scored = False
         t.signal_emitted = False
         await self.eval_queue.put(mint)
         print(f"[migration] {mint} → pool {t.pool_address}")
-
-    async def raydium_listener(self):
-        if not self.cfg.enable_raydium:
-            return
-        while self.running:
-            try:
-                async with websockets.connect(self.cfg.raydium_ws) as ws:
-                    print("[ws:raydium] connected")
-                    async for raw in ws:
-                        if not self.running:
-                            break
-                        try:
-                            msg = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        await self.handle_generic(msg, source="raydium")
-            except Exception as e:
-                print(f"[ws:raydium] error: {e}, reconnect 5s")
-                await asyncio.sleep(5)
-
-    async def meteora_listener(self):
-        if not self.cfg.enable_meteora:
-            return
-        while self.running:
-            try:
-                async with websockets.connect(self.cfg.meteora_ws) as ws:
-                    print("[ws:meteora] connected")
-                    async for raw in ws:
-                        if not self.running:
-                            break
-                        try:
-                            msg = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        await self.handle_generic(msg, source="meteora")
-            except Exception as e:
-                print(f"[ws:meteora] error: {e}, reconnect 5s")
-                await asyncio.sleep(5)
-
-    async def handle_generic(self, msg: dict, source: str):
-        mint = msg.get("mint") or msg.get("token")
-        if not mint:
-            return
-        if mint not in self.tokens:
-            self.tokens[mint] = TokenState(
-                mint=mint,
-                creator=msg.get("creator", ""),
-                source=source,
-                created_at=time.time(),
-                price=float(msg.get("price", 0) or 0),
-            )
-            await self.eval_queue.put(mint)
-            print(f"[new] {mint} ({source})")
-        await self.handle_trade(msg, source=source)
 
     async def handle_trade(self, msg: dict, source: str):
         mint = msg.get("mint") or msg.get("token")
         t = self.tokens.get(mint)
         if not t:
             return
-
         side = msg.get("txType", msg.get("side", "buy"))
         price = float(msg.get("price", 0) or 0)
         sol_amount = float(msg.get("solAmount", 0) or 0)
         wallet = msg.get("traderPublicKey", msg.get("wallet", ""))
-
         trade = {
-            "wallet": wallet,
-            "sol_amount": sol_amount,
-            "price": price,
+            "wallet": wallet, "sol_amount": sol_amount, "price": price,
             "slot": int(msg.get("slot", 0) or 0),
-            "timestamp": time.time(),
-            "side": side,
+            "timestamp": time.time(), "side": side,
         }
-
         if side == "buy":
             t.buys_count += 1
             t.volume_buys += sol_amount
             t.unique_buyers.add(wallet)
-            if len(self.buyers_buffer[mint]) < 200:
+            if len(self.buyers_buffer[mint]) < 300:
                 self.buyers_buffer[mint].append(trade)
         else:
             t.sells_count += 1
             t.volume_sells += sol_amount
-
         t.volume_usd = (t.volume_buys + t.volume_sells) * 150
         if price > 0:
             t.price = price
             self.price_history[mint].append((time.time(), price))
+        v_sol = float(msg.get("vSolInBondingCurve", 0) or 0)
+        if v_sol > 0:
+            t.bonding_pct = min(100.0, (v_sol / 85.0) * 100)
+            if not t.is_migrated:
+                t.liquidity_usd = max(t.liquidity_usd, v_sol * 150)
 
     # --------------------------------------------------------
-    # 11.2 WORKER POOL
+    # 11.2 DEXSCREENER DISCOVERY (BARU — memperluas coverage)
+    # --------------------------------------------------------
+
+    async def dexscreener_discovery_loop(self):
+        if not self.cfg.enable_dexscreener_discovery:
+            return
+        print("[discovery] DexScreener multi-source discovery started")
+        while self.running:
+            try:
+                mints: List[str] = []
+
+                # 1. Search queries
+                for q in self.cfg.discovery_queries:
+                    try:
+                        url = f"{self.cfg.dexscreener_search_url}?q={q}"
+                        async with self.rpc.sem:
+                            async with self.rpc.session.get(url) as resp:
+                                if resp.status != 200:
+                                    continue
+                                data = await resp.json()
+                        for p in (data.get("pairs", []) or [])[:self.cfg.discovery_max_per_query]:
+                            if p.get("chainId") == "solana":
+                                addr = p.get("baseToken", {}).get("address")
+                                if addr:
+                                    mints.append(addr)
+                    except Exception:
+                        pass
+
+                # 2. Boosts & profiles
+                for boost_url in (
+                    self.cfg.dexscreener_boosts_latest,
+                    self.cfg.dexscreener_boosts_top,
+                    self.cfg.dexscreener_profiles,
+                ):
+                    try:
+                        async with self.rpc.sem:
+                            async with self.rpc.session.get(boost_url) as resp:
+                                if resp.status != 200:
+                                    continue
+                                items = await resp.json()
+                        for it in (items or [])[:40]:
+                            if it.get("chainId") == "solana":
+                                addr = it.get("tokenAddress")
+                                if addr:
+                                    mints.append(addr)
+                    except Exception:
+                        pass
+
+                # 3. Raydium pools
+                try:
+                    async with self.rpc.sem:
+                        async with self.rpc.session.get(self.cfg.raydium_pools_url) as resp:
+                            if resp.status == 200:
+                                ray = await resp.json()
+                                for pool in ray.get("data", {}).get("data", []) or []:
+                                    mint_a = pool.get("mintA", {}).get("address")
+                                    sym_b = pool.get("mintB", {}).get("symbol", "")
+                                    mint_b = pool.get("mintB", {}).get("address")
+                                    t_mint = mint_a if sym_b in ("WSOL", "SOL") else mint_b
+                                    if t_mint:
+                                        mints.append(t_mint)
+                except Exception:
+                    pass
+
+                mints = list(dict.fromkeys(mints))
+                added = 0
+                for mint in mints:
+                    if mint in self.tokens:
+                        continue
+                    self.tokens[mint] = TokenState(
+                        mint=mint,
+                        creator="",
+                        source="dexscreener",
+                        created_at=time.time(),
+                    )
+                    await self.eval_queue.put(mint)
+                    added += 1
+
+                print(f"[discovery] scanned {len(mints)} mints, {added} new")
+            except Exception as e:
+                print(f"[discovery-error] {e}")
+            await asyncio.sleep(self.cfg.discovery_interval_sec)
+
+    # --------------------------------------------------------
+    # 11.3 WORKER POOL
     # --------------------------------------------------------
 
     async def worker(self, worker_id: int):
@@ -1438,7 +1545,6 @@ class HitAndRunScanner:
 
         now = time.time()
         age = now - t.created_at
-
         if age < self.cfg.min_age_sec and t.rescan_count == 0:
             await asyncio.sleep(self.cfg.min_age_sec - age)
             now = time.time()
@@ -1466,6 +1572,8 @@ class HitAndRunScanner:
             creator_rep,
             micro_wallets,
             pool_data,
+            buyer_quality,
+            dev_sold,
         ) = await asyncio.gather(
             self.rpc.get_holders(mint),
             self.rpc.get_lp_info(mint),
@@ -1476,15 +1584,19 @@ class HitAndRunScanner:
             self.rpc.get_creator_reputation(mint),
             self.rpc.get_micro_wallet_count(mint),
             self.rpc.get_pool_data(mint) if t.is_migrated else self._empty(),
+            self.rpc.analyze_buyer_quality(self.buyers_buffer.get(mint, [])),
+            self.rpc.check_dev_sold(mint, t.creator, t.created_at)
+            if t.creator else self._zero(),
         )
 
         locked, liq_usd, lp_pool, rug_score, rug_flags = lp_info
         mint_auth, freeze_auth = authorities
         rugpull_count, _ = creator_rep
+        real_buyers, bot_buyers, bot_ratio = buyer_quality
 
         # Isi state
         t.holders = holders
-        t.liquidity_usd = liq_usd
+        t.liquidity_usd = max(t.liquidity_usd, liq_usd)
         t.lp_locked = locked
         t.lp_pool = lp_pool
         t.rug_score = rug_score
@@ -1495,6 +1607,10 @@ class HitAndRunScanner:
         t.sell_simulation_ok = sell_ok
         t.creator_rugpull_count = rugpull_count
         t.micro_wallet_count = micro_wallets
+        t.real_buyers = real_buyers
+        t.bot_buyers = bot_buyers
+        t.bot_ratio = bot_ratio
+        t.dev_sold_pct = dev_sold
 
         if pool_data:
             t.market_cap_usd = pool_data.get("market_cap", 0.0)
@@ -1503,10 +1619,12 @@ class HitAndRunScanner:
             t.pool_age_minutes = (
                 (now - created_at_pool) / 60.0 if created_at_pool > 0 else 0.0
             )
-            # Update liquidity dari pool jika lebih akurat
             pool_liq = pool_data.get("liquidity_usd", 0.0)
             if pool_liq > 0:
                 t.liquidity_usd = pool_liq
+            if pool_data.get("price", 0) > 0:
+                t.price = pool_data["price"]
+                self.price_history[mint].append((now, t.price))
 
         # Harga 5m lalu
         history = self.price_history.get(mint)
@@ -1517,22 +1635,23 @@ class HitAndRunScanner:
         else:
             t.price_at_5m_ago = t.price
 
-        # Security checks dasar
         buyers = self.buyers_buffer.get(mint, [])
         bundle_count, _ = self.security.detect_bundle(buyers)
         sniper_count, _ = self.security.detect_sniper(buyers, t.created_at)
-        top10_pct, top1_pct, dev_pct = self.security.holder_concentration(
-            holders, lp_pool
-        )
+        top10_pct, top1_pct, dev_pct = self.security.holder_concentration(holders, lp_pool)
 
         dev_pct2, dev_flagged = await self.rpc.get_developer_holdings(
             mint, t.creator, lp_pool
         )
         t.dev_holding_pct = max(dev_pct, dev_pct2)
 
-        # ====================================================
-        # WALLET CLUSTER ANALYSIS (BARU)
-        # ====================================================
+        # Migration snipers
+        if t.is_migrated and self.cfg.enable_migration_sniper_check:
+            t.migration_snipers = self.security.detect_migration_snipers(
+                buyers, t.migration_detected_at
+            )
+
+        # Cluster analysis
         early_wallets = [b["wallet"] for b in buyers][:20]
         window_start = t.created_at - self.cfg.funding_window_hours * 3600
         window_end = t.created_at + 60
@@ -1541,13 +1660,11 @@ class HitAndRunScanner:
             (fresh_count, fresh_ratio),
             similar_balance,
         ) = await asyncio.gather(
-            self.cluster_analyzer.analyze_clusters(
-                early_wallets, window_start, window_end
-            ),
+            self.cluster_analyzer.analyze_clusters(early_wallets, window_start, window_end),
             self.cluster_analyzer.detect_fresh_wallets(holders),
             self.cluster_analyzer.detect_balance_pattern(holders),
         )
-        cluster_score, cluster_flags = self.cluster_analyzer.cluster_risk_score(
+        _, cluster_flags = self.cluster_analyzer.cluster_risk_score(
             clusters, len(holders), fresh_count, fresh_ratio, similar_balance
         )
         t.fresh_wallet_count = fresh_count
@@ -1559,7 +1676,7 @@ class HitAndRunScanner:
         )
 
         # ====================================================
-        # RED FLAGS — UMUM (berlaku di kedua fase)
+        # RED FLAGS
         # ====================================================
         red_flags: List[str] = []
 
@@ -1567,6 +1684,8 @@ class HitAndRunScanner:
             red_flags.append(f"bundle:{bundle_count}")
         if sniper_count > self.cfg.max_sniper_wallets:
             red_flags.append(f"sniper:{sniper_count}")
+        if t.migration_snipers > self.cfg.max_migration_snipers:
+            red_flags.append(f"migration_snipers:{t.migration_snipers}")
         if top10_pct > self.cfg.max_top10_holder_pct:
             red_flags.append(f"top10:{top10_pct:.1f}%")
         if top1_pct > self.cfg.max_top1_holder_pct:
@@ -1575,6 +1694,8 @@ class HitAndRunScanner:
             red_flags.append(f"dev_hold:{t.dev_holding_pct:.1f}%")
         if dev_flagged:
             red_flags.append("dev_still_holds")
+        if t.dev_sold_pct > self.cfg.max_dev_sell_pct:
+            red_flags.append(f"dev_sold:{t.dev_sold_pct:.1f}%")
         if len(holders) < self.cfg.min_holders_count:
             red_flags.append(f"too_few_holders:{len(holders)}")
         if self.cfg.require_mint_authority_revoked and mint_auth:
@@ -1591,20 +1712,27 @@ class HitAndRunScanner:
             red_flags.append(f"creator_rugpull_history:{rugpull_count}")
         if micro_wallets > self.cfg.max_micro_wallet_count:
             red_flags.append(f"micro_wallets:{micro_wallets}")
-        if self.cfg.require_lp_locked and not locked:
+        if self.cfg.require_lp_locked and not locked and t.is_migrated:
             red_flags.append("lp_not_locked")
-        if t.liquidity_usd < self.cfg.min_liquidity_usd:
+        if t.liquidity_usd < self.cfg.min_liquidity_usd and not t.is_migrated:
             red_flags.append(f"liq_low:${t.liquidity_usd:,.0f}")
         if rug_score > self.cfg.max_rugcheck_score:
             red_flags.append(f"rugcheck_score:{rug_score:.0f}")
-        if t.sells_count == 0 and age > 20 and not t.is_migrated:
-            red_flags.append("no_sell_yet_honeypot_risk")
+        if t.sells_count == 0 and age > 30 and not t.is_migrated:
+            red_flags.append("no_sell_yet")
+
+        # Buyer quality (bukan filter unique buyers lagi)
+        if self.cfg.enable_buyer_quality_check:
+            if bot_ratio > self.cfg.max_bot_ratio:
+                red_flags.append(f"bot_ratio:{bot_ratio:.0%}")
+            if real_buyers < self.cfg.min_real_buyers:
+                red_flags.append(f"real_buyers_low:{real_buyers}")
 
         red_flags.extend(cluster_flags)
         red_flags.extend(rug_flags)
 
         # ====================================================
-        # SKOR — pilih mode
+        # SKOR
         # ====================================================
         if t.is_migrated and self.cfg.enable_post_migration:
             score, reasons, score_flags = self.scorer.score_post_migration(t)
@@ -1617,17 +1745,24 @@ class HitAndRunScanner:
         t.scored = True
 
         # ====================================================
-        # SKIP: log console saja, TIDAK kirim Telegram
+        # SKIP: log saja
         # ====================================================
         if red_flags:
             print(f"[skip-{phase}] {mint} score={score} flags={red_flags}")
 
-            # Rescan jika masih memungkinkan
-            if (
+            can_rescan = (
                 self.cfg.enable_rescan
                 and t.rescan_count < self.cfg.max_rescan_count
                 and age < self.cfg.max_rescan_age_sec
-            ):
+            )
+            # Post-migration: rescan lebih lama
+            if t.is_migrated and self.cfg.enable_post_migration_rescan:
+                can_rescan = (
+                    t.rescan_count < self.cfg.max_rescan_count
+                    and t.pool_age_minutes < self.cfg.max_pool_age_minutes
+                )
+
+            if can_rescan:
                 t.rescan_count += 1
                 t.scored = False
                 t.next_rescan_at = now + self.cfg.rescan_delay_sec
@@ -1636,25 +1771,18 @@ class HitAndRunScanner:
                     f"[rescan-scheduled] {mint} in {self.cfg.rescan_delay_sec}s "
                     f"(attempt {t.rescan_count}/{self.cfg.max_rescan_count})"
                 )
-            else:
-                # Sudah maksimal, tapi tetap simpan kalau migrated (untuk re-evaluasi nanti)
-                if not t.is_migrated:
-                    self.tokens.pop(mint, None)
+            elif not t.is_migrated:
+                self.tokens.pop(mint, None)
             return
 
         # ====================================================
-        # LOLOS FILTER: kirim Telegram + simpan signal
+        # LOLOS: signal + telegram
         # ====================================================
         if score >= self.cfg.min_conviction_score:
             signal = Signal(
-                mint=mint,
-                score=score,
-                entry_price=t.price,
-                reasons=reasons,
-                red_flags=[],
-                timestamp=now,
-                source=t.source,
-                phase=phase,
+                mint=mint, score=score, entry_price=t.price,
+                reasons=reasons, red_flags=[], timestamp=now,
+                source=t.source, phase=phase,
             )
             t.signal_emitted = True
             self.signals.append(signal)
@@ -1668,8 +1796,11 @@ class HitAndRunScanner:
     async def _empty(self):
         return {}
 
+    async def _zero(self):
+        return 0.0
+
     # --------------------------------------------------------
-    # 11.3 RESCAN LOOP
+    # 11.4 RESCAN LOOP
     # --------------------------------------------------------
 
     async def rescan_loop(self):
@@ -1690,7 +1821,7 @@ class HitAndRunScanner:
             await asyncio.sleep(2.0)
 
     # --------------------------------------------------------
-    # 11.4 SIGNAL CONSUMER
+    # 11.5 SIGNAL CONSUMER
     # --------------------------------------------------------
 
     async def signal_consumer(self):
@@ -1711,16 +1842,14 @@ class HitAndRunScanner:
         if not self.positions.can_open(size_total, self.portfolio_usd):
             print(f"[risk] skip {signal.mint} (exposure/loss streak)")
             return
-
         pos = self.positions.open(signal, size_total * 0.3)
         print(
             f"[ENTRY-1] {signal.mint} 30% @ {signal.entry_price:.8f} "
             f"stop={pos.stop_price:.8f}"
         )
-        # TODO: eksekusi swap nyata (Jupiter / pump.fun buy)
 
     # --------------------------------------------------------
-    # 11.5 MONITOR & EXIT
+    # 11.6 MONITOR & EXIT
     # --------------------------------------------------------
 
     async def monitor_loop(self):
@@ -1743,7 +1872,6 @@ class HitAndRunScanner:
         pos = self.positions.positions.get(mint)
         if not pos:
             return
-
         if action == "stop_loss":
             pnl = (price - pos.entry_price) / pos.entry_price * 100
             print(f"[EXIT-SL] {mint} @ {price:.8f} pnl={pnl:.1f}%")
@@ -1751,14 +1879,12 @@ class HitAndRunScanner:
             if self.cfg.telegram_enabled:
                 await self.telegram.send_exit_alert(mint, price, "stop_loss", pnl)
             self.positions.close(mint, pnl)
-
         elif action == "take_initials":
-            print(f"[EXIT-50%] {mint} @ {price:.8f} (recover modal)")
+            print(f"[EXIT-50%] {mint} @ {price:.8f}")
             pos.remaining_pct = 50.0
             self.logger.log_exit(mint, price, "take_initials", 100.0)
             if self.cfg.telegram_enabled:
                 await self.telegram.send_exit_alert(mint, price, "take_initials", 100.0)
-
         elif action == "trailing":
             pnl = (price - pos.entry_price) / pos.entry_price * 100
             print(f"[EXIT-TRAIL] {mint} @ {price:.8f} pnl={pnl:.1f}%")
@@ -1766,7 +1892,6 @@ class HitAndRunScanner:
             if self.cfg.telegram_enabled:
                 await self.telegram.send_exit_alert(mint, price, "trailing", pnl)
             self.positions.close(mint, pnl)
-
         elif action == "time_stop":
             pnl = (price - pos.entry_price) / pos.entry_price * 100
             print(f"[EXIT-TIME] {mint} @ {price:.8f} pnl={pnl:.1f}%")
@@ -1776,7 +1901,7 @@ class HitAndRunScanner:
             self.positions.close(mint, pnl)
 
     # --------------------------------------------------------
-    # 11.6 ORCHESTRATION
+    # 11.7 ORCHESTRATION
     # --------------------------------------------------------
 
     async def run(self):
@@ -1785,8 +1910,7 @@ class HitAndRunScanner:
 
         tasks = [
             asyncio.create_task(self.pumpportal_listener()),
-            asyncio.create_task(self.raydium_listener()),
-            asyncio.create_task(self.meteora_listener()),
+            asyncio.create_task(self.dexscreener_discovery_loop()),
             asyncio.create_task(self.signal_consumer()),
             asyncio.create_task(self.monitor_loop()),
             asyncio.create_task(self.rescan_loop()),
@@ -1808,26 +1932,21 @@ class HitAndRunScanner:
 
 
 # ============================================================
-# 12. BACKTEST (opsional)
+# 12. BACKTEST (placeholder)
 # ============================================================
 
 async def backtest(csv_file: str, cfg: Config):
     scorer = FastScorer(cfg)
-    wins, losses, pnls = 0, 0, []
-
+    total = 0
     with open(csv_file) as f:
         for row in csv.DictReader(f):
             t = TokenState(
-                mint=row["mint"],
-                creator="",
-                source="backtest",
+                mint=row["mint"], creator="", source="backtest",
                 created_at=float(row["timestamp"]),
                 bonding_pct=float(row["bonding_pct"]),
                 price=float(row["price"]),
                 liquidity_usd=float(row["liquidity"]),
-                unique_buyers=set(
-                    f"w{i}" for i in range(int(row["unique_buyers"]))
-                ),
+                unique_buyers=set(f"w{i}" for i in range(int(row["unique_buyers"]))),
                 volume_buys=float(row["volume_buys"]),
                 volume_sells=float(row["volume_sells"]),
             )
@@ -1835,16 +1954,12 @@ async def backtest(csv_file: str, cfg: Config):
             if flags:
                 continue
             if score >= cfg.min_conviction_score:
-                pass
-
-    total = wins + losses
-    win_rate = wins / total * 100 if total else 0
-    avg_pnl = sum(pnls) / len(pnls) if pnls else 0
-    print(f"[backtest] signals={total} win_rate={win_rate:.1f}% avg_pnl={avg_pnl:.2f}%")
+                total += 1
+    print(f"[backtest] signals={total}")
 
 
 # ============================================================
-# 13. ENTRY POINT + SIGTERM HANDLER (Render)
+# 13. ENTRY POINT
 # ============================================================
 
 async def main():
@@ -1852,7 +1967,7 @@ async def main():
     scanner = HitAndRunScanner(cfg)
 
     def handle_shutdown(signum, frame):
-        print(f"[shutdown] signal {signum} diterima, menutup scanner...")
+        print(f"[shutdown] signal {signum}, menutup scanner...")
         scanner.running = False
 
     signal.signal(signal.SIGTERM, handle_shutdown)
