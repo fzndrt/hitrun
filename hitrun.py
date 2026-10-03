@@ -1,20 +1,20 @@
 # ============================================================
-# HIT-AND-RUN SCANNER (v3 FINAL)
+# HITRUN.PY — Hit-and-Run Scanner v4 (FINAL)
 # ============================================================
 # Tema: entry cepat (hit and run) TAPI aman dari rugpull.
 #
-# Perubahan kunci dibanding v1 & v2:
-#  - TANPA Helius (berbayar). Diganti:
-#      * three.ws API       -> data holders (gratis, no key)
-#      * MagicBlock RPC     -> fallback getTokenLargestAccounts
-#      * RugCheck API       -> LP lock, rug score, risks (gratis)
-#  - Multi-source ingestion (PumpPortal + optional Raydium/Meteora)
-#  - Worker pool paralel (8 worker default) untuk scan lebih banyak token
+# Fitur:
+#  - Multi-source WS: PumpPortal (+ Raydium/Meteora opsional)
+#  - Worker pool paralel (8 worker default) → scan banyak token
 #  - Cache TTL untuk hemat rate-limit endpoint gratis
-#  - Lapisan keamanan berlapis: bundle, sniper, holder concentration,
-#    LP lock, rug score, dev holding, honeypot heuristic
+#  - GRATIS: three.ws API + MagicBlock RPC + RugCheck (tanpa Helius)
+#  - Lapisan keamanan:
+#      bundle, sniper, top1/top10 holder, dev holding,
+#      funding cluster, LP lock, rug score, honeypot heuristic
+#  - Telegram alert bertag [HIT-AND-RUN] (signal, skip, exit)
 #  - Entry bertahap, SL keras, TP bertahap, trailing, time stop
 #  - Logging JSONL + hook backtest
+#  - SIGTERM handler untuk Render Background Worker
 # ============================================================
 
 import asyncio
@@ -22,6 +22,7 @@ import json
 import os
 import time
 import csv
+import signal
 import aiohttp
 import websockets
 from collections import defaultdict, deque
@@ -35,7 +36,7 @@ from typing import Dict, List, Optional, Tuple, Set
 
 @dataclass
 class Config:
-    # --- Jendela observasi (cepat untuk hit and run) ---
+    # --- Jendela observasi ---
     observation_window_sec: int = 25
     min_age_sec: int = 5
 
@@ -50,7 +51,9 @@ class Config:
     # --- Filter likuiditas & holder ---
     min_liquidity_usd: float = 15_000.0
     max_top10_holder_pct: float = 25.0
+    max_top1_holder_pct: float = 3.0
     max_dev_holding_pct: float = 5.0
+    min_holders_count: int = 50
     require_lp_locked: bool = True
     min_lp_locked_pct: float = 95.0
     max_rugcheck_score: float = 60.0
@@ -74,7 +77,7 @@ class Config:
     trailing_stop_pct: float = 25.0
     time_stop_hours: int = 24
 
-    # --- Sumber data multi-source ---
+    # --- Multi-source WS ---
     pumpportal_ws: str = "wss://pumpportal.fun/api/data"
     raydium_ws: str = "wss://api.raydium.io/v2/ws"
     meteora_ws: str = "wss://meteora.ag/ws"
@@ -82,25 +85,36 @@ class Config:
     enable_meteora: bool = False
 
     # --- Endpoint GRATIS (pengganti Helius) ---
-    # three.ws API -> data holders tanpa API key
     threews_api_url: str = "https://three.ws/api/crypto"
-    # MagicBlock RPC -> fallback getTokenLargestAccounts tanpa API key
     holder_rpc_url: str = "https://rpc.magicblock.app/mainnet"
-    # RPC publik untuk fallback umum
     public_rpc_url: str = "https://solana-rpc.publicnode.com"
-    # RugCheck API -> gratis, tanpa key
     rugcheck_url: str = "https://api.rugcheck.xyz/v1"
 
-    # --- Konkurensi & worker pool ---
+    # --- Worker & cache ---
     worker_count: int = 8
     rpc_semaphore: int = 12
     evaluate_interval_sec: float = 1.0
     monitor_interval_sec: float = 2.0
-
-    # --- Cache TTL (hemat rate limit endpoint gratis) ---
     cache_ttl_holders_sec: int = 15
     cache_ttl_lp_sec: int = 30
     cache_ttl_supply_sec: int = 60
+
+    # --- Funding graph ---
+    funding_window_hours: int = 72
+    max_cluster_pct: float = 30.0
+    max_clusters: int = 3
+
+    # --- Telegram alert ---
+    telegram_bot_token: str = field(
+        default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", "")
+    )
+    telegram_chat_id: str = field(
+        default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", "")
+    )
+    telegram_enabled: bool = True
+
+    # --- Portfolio ---
+    portfolio_usd: float = 1000.0
 
     # --- Logging ---
     log_file: str = "trades.jsonl"
@@ -166,7 +180,7 @@ class Position:
 # ============================================================
 
 class TimedCache:
-    """Cache dengan TTL per entry untuk hemat rate-limit endpoint gratis."""
+    """Cache dengan TTL untuk hemat rate-limit endpoint gratis."""
 
     def __init__(self):
         self._store: Dict[str, Tuple[float, object]] = {}
@@ -197,11 +211,9 @@ class TimedCache:
 
 class RpcClient:
     """
-    Klien data on-chain GRATIS. Tidak butuh Helius.
-    Urutan strategi get_holders:
-      1) three.ws API   (paling mudah, sudah terformat)
-      2) MagicBlock RPC (fallback, JSON-RPC langsung)
-    get_lp_info: RugCheck API (gratis, tanpa key).
+    Klien data on-chain GRATIS tanpa Helius.
+    Urutan get_holders: three.ws → MagicBlock → public RPC.
+    get_lp_info: RugCheck (gratis, no key).
     """
 
     def __init__(self, cfg: Config, cache: TimedCache):
@@ -225,12 +237,9 @@ class RpcClient:
         if cached is not None:
             return cached
 
-        # Strategy 1: three.ws
         holders = await self._holders_threews(mint)
-        # Strategy 2: MagicBlock RPC
         if not holders:
             holders = await self._holders_rpc(mint, self.cfg.holder_rpc_url)
-        # Strategy 3: public RPC fallback
         if not holders:
             holders = await self._holders_rpc(mint, self.cfg.public_rpc_url)
 
@@ -239,10 +248,6 @@ class RpcClient:
         return holders
 
     async def _holders_threews(self, mint: str) -> Dict[str, float]:
-        """
-        Ambil holders dari three.ws API.
-        Struktur respons bisa berbeda; sesuaikan parser di sini.
-        """
         url = f"{self.cfg.threews_api_url}/holders?address={mint}"
         async with self.sem:
             try:
@@ -314,14 +319,60 @@ class RpcClient:
         self.cache.set(f"supply:{mint}", supply)
         return supply
 
-    # ---------- LP & RISK (RugCheck, gratis) ----------
+    # ---------- DEV WALLET & FUNDING ----------
+
+    async def get_developer_holdings(
+        self, mint: str, creator: str, lp_pool: str
+    ) -> Tuple[float, bool]:
+        holders = await self.get_holders(mint)
+        dev_pct = 0.0
+        for wallet, pct in holders.items():
+            if wallet == creator:
+                dev_pct = pct
+                break
+        is_flagged = dev_pct > 5.0
+        return dev_pct, is_flagged
+
+    async def get_signatures(self, address: str, limit: int = 50) -> list:
+        payload = {
+            "jsonrpc": "2.0", "id": "1",
+            "method": "getSignaturesForAddress",
+            "params": [address, {"limit": limit}],
+        }
+        async with self.sem:
+            try:
+                async with self.session.post(
+                    self.cfg.holder_rpc_url, json=payload
+                ) as resp:
+                    data = await resp.json()
+                return data.get("result", [])
+            except Exception:
+                return []
+
+    async def get_transaction(self, signature: str) -> Optional[dict]:
+        payload = {
+            "jsonrpc": "2.0", "id": "1",
+            "method": "getTransaction",
+            "params": [
+                signature,
+                {"maxSupportedTransactionVersion": 0, "encoding": "jsonParsed"},
+            ],
+        }
+        async with self.sem:
+            try:
+                async with self.session.post(
+                    self.cfg.holder_rpc_url, json=payload
+                ) as resp:
+                    data = await resp.json()
+                return data.get("result")
+            except Exception:
+                return None
+
+    # ---------- LP & RISK (RugCheck) ----------
 
     async def get_lp_info(
         self, mint: str
     ) -> Tuple[bool, float, str, float, List[str]]:
-        """
-        Return: (lp_locked, liquidity_usd, lp_pool, rug_score, red_flags)
-        """
         cached = self.cache.get(f"lp:{mint}", self.cfg.cache_ttl_lp_sec)
         if cached is not None:
             return cached
@@ -414,19 +465,98 @@ class SecurityAnalyzer:
 
     def holder_concentration(
         self, holders: Dict[str, float], lp_pool: str
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, float]:
+        """Return: (top10_pct, top1_pct, dev_pct) semua exclude LP pool."""
         filtered = {w: p for w, p in holders.items() if w != lp_pool}
-        top10 = sum(sorted(filtered.values(), reverse=True)[:10])
+        if not filtered:
+            return 0.0, 0.0, 0.0
+        sorted_pcts = sorted(filtered.values(), reverse=True)
+        top10 = sum(sorted_pcts[:10])
+        top1 = sorted_pcts[0]
         dev_pct = filtered.get("dev", 0.0)
-        return top10, dev_pct
+        return top10, top1, dev_pct
 
 
 # ============================================================
-# 6. FAST SCORER
+# 6. FUNDING GRAPH ANALYZER
+# ============================================================
+
+class FundingGraphAnalyzer:
+    """Lacak aliran dana wallet untuk deteksi cluster terkoordinasi."""
+
+    KNOWN_EXCHANGES = {
+        "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+        "2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S",
+        "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+    }
+
+    def __init__(self, cfg: Config, rpc_client: RpcClient):
+        self.cfg = cfg
+        self.rpc = rpc_client
+
+    async def find_funder(
+        self, wallet: str, window_start: float, window_end: float
+    ) -> Optional[str]:
+        sigs = await self.rpc.get_signatures(wallet, limit=50)
+        for s in sigs:
+            block_time = s.get("blockTime", 0)
+            if not block_time or block_time > window_end:
+                continue
+            if block_time < window_start:
+                return None
+            tx = await self.rpc.get_transaction(s["signature"])
+            if not tx or not tx.get("meta"):
+                continue
+            try:
+                keys = [k["pubkey"] for k in tx["transaction"]["message"]["accountKeys"]]
+            except (KeyError, TypeError):
+                continue
+            idx = keys.index(wallet) if wallet in keys else -1
+            if idx < 0:
+                continue
+            received = tx["meta"]["postBalances"][idx] - tx["meta"]["preBalances"][idx]
+            if received < 5_000_000:
+                continue
+            for i, key in enumerate(keys):
+                if i == idx:
+                    continue
+                sent = tx["meta"]["preBalances"][i] - tx["meta"]["postBalances"][i]
+                if sent >= 5_000_000:
+                    return key
+        return None
+
+    async def analyze_clusters(
+        self, wallets: List[str], window_start: float, window_end: float
+    ) -> Dict[str, List[str]]:
+        funder_map: Dict[str, List[str]] = defaultdict(list)
+        for w in wallets:
+            if w in self.KNOWN_EXCHANGES:
+                continue
+            funder = await self.find_funder(w, window_start, window_end)
+            if funder and funder not in self.KNOWN_EXCHANGES:
+                funder_map[funder].append(w)
+        return {f: ws for f, ws in funder_map.items() if len(ws) >= 2}
+
+    def cluster_risk_score(
+        self, clusters: Dict[str, List[str]], total_holders: int
+    ) -> Tuple[float, List[str]]:
+        red_flags: List[str] = []
+        total_clustered = sum(len(ws) for ws in clusters.values())
+        clustered_pct = (total_clustered / total_holders * 100) if total_holders > 0 else 0
+        score = min(100, clustered_pct * 2)
+        if clustered_pct > self.cfg.max_cluster_pct:
+            red_flags.append(f"funding_cluster:{clustered_pct:.0f}%")
+        if len(clusters) >= self.cfg.max_clusters:
+            red_flags.append(f"multiple_clusters:{len(clusters)}")
+        return round(score, 2), red_flags
+
+
+# ============================================================
+# 7. FAST SCORER
 # ============================================================
 
 class FastScorer:
-    """Skor cepat (data detik, bukan menit) untuk entry hit-and-run."""
+    """Skor cepat untuk entry hit-and-run."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -441,7 +571,6 @@ class FastScorer:
             pump_pct = (t.price - t.price_at_5m_ago) / t.price_at_5m_ago * 100
         else:
             pump_pct = 0.0
-
         if pump_pct > self.cfg.max_price_pump_5m_pct:
             red_flags.append(f"price_pump_too_high:{pump_pct:.1f}%")
         elif pump_pct >= self.cfg.min_price_pump_5m_pct:
@@ -486,19 +615,11 @@ class FastScorer:
 
 
 # ============================================================
-# 7. POSITION MANAGER
+# 8. POSITION MANAGER
 # ============================================================
 
 class PositionManager:
-    """
-    Exit plan disiplin:
-      - Entry bertahap (30% dulu, sisanya tunggu konfirmasi)
-      - Hard SL 35%
-      - Take initials 50% di 2x (recover modal)
-      - Trailing stop 25% untuk moon bag
-      - Time stop 24 jam
-      - Circuit breaker 3 loss berturut-turut
-    """
+    """Exit plan disiplin: SL 35%, TP 2x, trailing 25%, time stop 24h."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -512,9 +633,7 @@ class PositionManager:
         exposure_pct = (self.daily_exposure + size_usd) / portfolio_usd * 100
         return exposure_pct <= self.cfg.max_daily_exposure_pct
 
-    def open(
-        self, signal: Signal, size_usd: float, portfolio_usd: float
-    ) -> Position:
+    def open(self, signal: Signal, size_usd: float) -> Position:
         stop = signal.entry_price * (1 - self.cfg.hard_stop_loss_pct / 100)
         pos = Position(
             mint=signal.mint,
@@ -542,12 +661,10 @@ class PositionManager:
         if new_trailing > pos.trailing_price:
             pos.trailing_price = new_trailing
 
-        # Hard SL
         if price <= pos.stop_price:
             actions.append("stop_loss")
             return actions
 
-        # Take initials di 2x
         if (
             not pos.initial_recovered
             and price >= pos.entry_price * self.cfg.take_initials_multiple
@@ -555,11 +672,9 @@ class PositionManager:
             actions.append("take_initials")
             pos.initial_recovered = True
 
-        # Trailing setelah recover
         if pos.initial_recovered and price <= pos.trailing_price:
             actions.append("trailing")
 
-        # Time stop
         if (time.time() - pos.opened_at) > self.cfg.time_stop_hours * 3600:
             actions.append("time_stop")
 
@@ -574,12 +689,10 @@ class PositionManager:
 
 
 # ============================================================
-# 8. TRADE LOGGER
+# 9. TRADE LOGGER
 # ============================================================
 
 class TradeLogger:
-    """Catat sinyal & exit ke JSONL untuk audit dan backtest."""
-
     def __init__(self, log_file: str):
         self.log_file = log_file
 
@@ -617,18 +730,113 @@ class TradeLogger:
 
 
 # ============================================================
-# 9. SCANNER UTAMA
+# 10. TELEGRAM ALERTER
+# ============================================================
+
+class TelegramAlerter:
+    """Alert Telegram bertag [HIT-AND-RUN]."""
+
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.base_url = f"https://api.telegram.org/bot{bot_token}"
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def start(self):
+        if not self.bot_token or not self.chat_id:
+            print("[telegram] token/chat_id kosong, alert dinonaktifkan")
+            return
+        self.session = aiohttp.ClientSession()
+        # Test koneksi
+        await self._send("✅ <b>[HIT-AND-RUN] scanner online</b>")
+
+    async def close(self):
+        if self.session:
+            await self.session.close()
+
+    async def send_signal_alert(self, signal: Signal, token: TokenState):
+        emoji = "🟢" if signal.score >= 80 else "🟡"
+        text = (
+            f"{emoji} <b>[HIT-AND-RUN] SIGNAL DETECTED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Token:</b> <code>{signal.mint}</code>\n"
+            f"<b>Source:</b> {signal.source}\n"
+            f"<b>Score:</b> {signal.score}/100\n"
+            f"<b>Entry Price:</b> <code>{signal.entry_price:.8f}</code>\n"
+            f"<b>Bonding:</b> {token.bonding_pct:.1f}%\n"
+            f"<b>Liquidity:</b> ${token.liquidity_usd:,.0f}\n"
+            f"<b>Unique Buyers:</b> {len(token.unique_buyers)}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Alasan:</b>\n" +
+            "\n".join(f"  • {r}" for r in signal.reasons) +
+            f"\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Exit Plan:</b>\n"
+            f"  • SL: -35%\n"
+            f"  • TP: +100% (jual 50%)\n"
+            f"  • Trailing: 25%\n"
+            f"  • Time Stop: 24 jam\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <i>Entry bertahap 30%. Tunggu konfirmasi.</i>"
+        )
+        await self._send(text)
+
+    async def send_exit_alert(
+        self, mint: str, price: float, reason: str, pnl_pct: float
+    ):
+        emoji = "🟢" if pnl_pct > 0 else "🔴"
+        reason_label = {
+            "stop_loss": "🛑 STOP LOSS",
+            "take_initials": "💰 TAKE INITIALS (50%)",
+            "trailing": "📉 TRAILING STOP",
+            "time_stop": "⏰ TIME STOP",
+        }.get(reason, reason)
+        text = (
+            f"{emoji} <b>[HIT-AND-RUN] EXIT — {reason_label}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Token:</b> <code>{mint}</code>\n"
+            f"<b>Exit Price:</b> <code>{price:.8f}</code>\n"
+            f"<b>PnL:</b> {pnl_pct:+.1f}%\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        await self._send(text)
+
+    async def send_skip_alert(self, mint: str, score: float, red_flags: list):
+        text = (
+            f"⛔ <b>[HIT-AND-RUN] SKIP</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Token:</b> <code>{mint}</code>\n"
+            f"<b>Score:</b> {score}/100\n"
+            f"<b>Red Flags:</b>\n" +
+            "\n".join(f"  ❌ {f}" for f in red_flags) +
+            f"\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Token tidak aman untuk entry.</i>"
+        )
+        await self._send(text)
+
+    async def _send(self, text: str):
+        if not self.session:
+            return
+        url = f"{self.base_url}/sendMessage"
+        payload = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            async with self.session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    print(f"[telegram-error] status={resp.status} body={body[:200]}")
+        except Exception as e:
+            print(f"[telegram-error] {e}")
+
+
+# ============================================================
+# 11. SCANNER UTAMA
 # ============================================================
 
 class HitAndRunScanner:
-    """
-    Alur:
-      WS multi-source -> tokens store -> eval_queue
-      -> worker pool -> security check -> signal_queue
-      -> signal_consumer (entry bertahap)
-      -> monitor_loop (exit plan)
-    """
-
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.cache = TimedCache()
@@ -637,6 +845,11 @@ class HitAndRunScanner:
         self.scorer = FastScorer(cfg)
         self.positions = PositionManager(cfg)
         self.logger = TradeLogger(cfg.log_file)
+        self.telegram = TelegramAlerter(
+            bot_token=cfg.telegram_bot_token,
+            chat_id=cfg.telegram_chat_id,
+        )
+        self.funding_analyzer = FundingGraphAnalyzer(cfg, self.rpc)
 
         self.tokens: Dict[str, TokenState] = {}
         self.price_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
@@ -646,11 +859,11 @@ class HitAndRunScanner:
         self.eval_queue: asyncio.Queue = asyncio.Queue()
         self.signal_queue: asyncio.Queue = asyncio.Queue()
 
-        self.portfolio_usd = 1000.0
+        self.portfolio_usd = cfg.portfolio_usd
         self.running = True
 
     # --------------------------------------------------------
-    # 9.1 INGESTION: WebSocket multi-source
+    # 11.1 INGESTION
     # --------------------------------------------------------
 
     async def pumpportal_listener(self):
@@ -660,6 +873,8 @@ class HitAndRunScanner:
                     await ws.send(json.dumps({"method": "subscribeNewToken"}))
                     print("[ws:pumpfun] connected")
                     async for raw in ws:
+                        if not self.running:
+                            break
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
@@ -677,6 +892,8 @@ class HitAndRunScanner:
                 async with websockets.connect(self.cfg.raydium_ws) as ws:
                     print("[ws:raydium] connected")
                     async for raw in ws:
+                        if not self.running:
+                            break
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
@@ -694,6 +911,8 @@ class HitAndRunScanner:
                 async with websockets.connect(self.cfg.meteora_ws) as ws:
                     print("[ws:meteora] connected")
                     async for raw in ws:
+                        if not self.running:
+                            break
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:
@@ -773,7 +992,7 @@ class HitAndRunScanner:
             self.price_history[mint].append((time.time(), price))
 
     # --------------------------------------------------------
-    # 9.2 WORKER POOL: evaluasi paralel
+    # 11.2 WORKER POOL
     # --------------------------------------------------------
 
     async def worker(self, worker_id: int):
@@ -803,7 +1022,7 @@ class HitAndRunScanner:
         if age > self.cfg.observation_window_sec and not t.signal_emitted:
             return
 
-        # --- Refresh data on-chain (paralel, gratis) ---
+        # --- Refresh data on-chain (paralel) ---
         holders_task = asyncio.create_task(self.rpc.get_holders(mint))
         lp_task = asyncio.create_task(self.rpc.get_lp_info(mint))
         holders, lp_info = await asyncio.gather(holders_task, lp_task)
@@ -828,9 +1047,26 @@ class HitAndRunScanner:
         buyers = self.buyers_buffer.get(mint, [])
         bundle_count, _ = self.security.detect_bundle(buyers)
         sniper_count, _ = self.security.detect_sniper(buyers, t.created_at)
-        top10_pct, dev_pct = self.security.holder_concentration(holders, lp_pool)
+        top10_pct, top1_pct, _ = self.security.holder_concentration(holders, lp_pool)
+
+        # --- Developer holding tracking ---
+        dev_pct, dev_flagged = await self.rpc.get_developer_holdings(
+            mint, t.creator, lp_pool
+        )
         t.dev_holding_pct = dev_pct
 
+        # --- Funding cluster analysis ---
+        early_wallets = [b["wallet"] for b in buyers][:20]
+        window_start = t.created_at - self.cfg.funding_window_hours * 3600
+        window_end = t.created_at + 60
+        clusters = await self.funding_analyzer.analyze_clusters(
+            early_wallets, window_start, window_end
+        )
+        _, cluster_flags = self.funding_analyzer.cluster_risk_score(
+            clusters, len(holders)
+        )
+
+        # --- Kumpulkan red flags ---
         red_flags: List[str] = []
         if bundle_count > self.cfg.max_bundle_wallets:
             red_flags.append(f"bundle:{bundle_count}")
@@ -838,18 +1074,24 @@ class HitAndRunScanner:
             red_flags.append(f"sniper:{sniper_count}")
         if top10_pct > self.cfg.max_top10_holder_pct:
             red_flags.append(f"top10:{top10_pct:.1f}%")
+        if top1_pct > self.cfg.max_top1_holder_pct:
+            red_flags.append(f"top1:{top1_pct:.1f}%")
         if dev_pct > self.cfg.max_dev_holding_pct:
             red_flags.append(f"dev_hold:{dev_pct:.1f}%")
+        if dev_flagged:
+            red_flags.append("dev_still_holds")
         if self.cfg.require_lp_locked and not locked:
             red_flags.append("lp_not_locked")
         if liq_usd < self.cfg.min_liquidity_usd:
             red_flags.append(f"liq_low:${liq_usd:,.0f}")
         if rug_score > self.cfg.max_rugcheck_score:
             red_flags.append(f"rugcheck_score:{rug_score:.0f}")
-        # Honeypot heuristic: tidak ada sell setelah 20 detik
         if t.sells_count == 0 and age > 20:
             red_flags.append("no_sell_yet_honeypot_risk")
+        if len(holders) < self.cfg.min_holders_count:
+            red_flags.append(f"too_few_holders:{len(holders)}")
         red_flags.extend(rug_flags)
+        red_flags.extend(cluster_flags)
 
         # --- Scoring ---
         score, reasons, score_flags = self.scorer.score(t)
@@ -858,6 +1100,8 @@ class HitAndRunScanner:
 
         if red_flags:
             print(f"[skip] {mint} score={score} flags={red_flags}")
+            if self.cfg.telegram_enabled:
+                await self.telegram.send_skip_alert(mint, score, red_flags)
             return
 
         if score >= self.cfg.min_conviction_score:
@@ -876,9 +1120,11 @@ class HitAndRunScanner:
             await self.signal_queue.put(signal)
             print(f"[SIGNAL] {mint} src={t.source} score={score} price={t.price:.8f}")
             print(f"  reasons: {reasons}")
+            if self.cfg.telegram_enabled:
+                await self.telegram.send_signal_alert(signal, t)
 
     # --------------------------------------------------------
-    # 9.3 SIGNAL CONSUMER: entry bertahap
+    # 11.3 SIGNAL CONSUMER
     # --------------------------------------------------------
 
     async def signal_consumer(self):
@@ -895,24 +1141,20 @@ class HitAndRunScanner:
                 self.signal_queue.task_done()
 
     async def execute_entry(self, signal: Signal):
-        """
-        Entry bertahap: 30% di sinyal awal.
-        Sisanya tunggu konfirmasi (dipanggil manual atau via logika tambahan).
-        """
         size_total = self.portfolio_usd * (self.cfg.position_size_pct / 100)
         if not self.positions.can_open(size_total, self.portfolio_usd):
             print(f"[risk] skip {signal.mint} (exposure/loss streak)")
             return
 
-        pos = self.positions.open(signal, size_total * 0.3, self.portfolio_usd)
+        pos = self.positions.open(signal, size_total * 0.3)
         print(
             f"[ENTRY-1] {signal.mint} 30% @ {signal.entry_price:.8f} "
             f"stop={pos.stop_price:.8f}"
         )
-        # TODO: eksekusi swap nyata (Jupiter/pump.fun buy)
+        # TODO: eksekusi swap nyata (Jupiter / pump.fun buy)
 
     # --------------------------------------------------------
-    # 9.4 MONITOR: exit plan
+    # 11.4 MONITOR & EXIT
     # --------------------------------------------------------
 
     async def monitor_loop(self):
@@ -940,32 +1182,41 @@ class HitAndRunScanner:
             pnl = (price - pos.entry_price) / pos.entry_price * 100
             print(f"[EXIT-SL] {mint} @ {price:.8f} pnl={pnl:.1f}%")
             self.logger.log_exit(mint, price, "stop_loss", pnl)
+            if self.cfg.telegram_enabled:
+                await self.telegram.send_exit_alert(mint, price, "stop_loss", pnl)
             self.positions.close(mint, pnl)
 
         elif action == "take_initials":
             print(f"[EXIT-50%] {mint} @ {price:.8f} (recover modal)")
             pos.remaining_pct = 50.0
             self.logger.log_exit(mint, price, "take_initials", 100.0)
-            # TODO: swap sell 50%
+            if self.cfg.telegram_enabled:
+                await self.telegram.send_exit_alert(mint, price, "take_initials", 100.0)
 
         elif action == "trailing":
             pnl = (price - pos.entry_price) / pos.entry_price * 100
             print(f"[EXIT-TRAIL] {mint} @ {price:.8f} pnl={pnl:.1f}%")
             self.logger.log_exit(mint, price, "trailing", pnl)
+            if self.cfg.telegram_enabled:
+                await self.telegram.send_exit_alert(mint, price, "trailing", pnl)
             self.positions.close(mint, pnl)
 
         elif action == "time_stop":
             pnl = (price - pos.entry_price) / pos.entry_price * 100
             print(f"[EXIT-TIME] {mint} @ {price:.8f} pnl={pnl:.1f}%")
             self.logger.log_exit(mint, price, "time_stop", pnl)
+            if self.cfg.telegram_enabled:
+                await self.telegram.send_exit_alert(mint, price, "time_stop", pnl)
             self.positions.close(mint, pnl)
 
     # --------------------------------------------------------
-    # 9.5 ORCHESTRATION
+    # 11.5 ORCHESTRATION
     # --------------------------------------------------------
 
     async def run(self):
         await self.rpc.start()
+        await self.telegram.start()
+
         tasks = [
             asyncio.create_task(self.pumpportal_listener()),
             asyncio.create_task(self.raydium_listener()),
@@ -985,18 +1236,18 @@ class HitAndRunScanner:
             self.running = False
             for t in tasks:
                 t.cancel()
+            await self.telegram.close()
             await self.rpc.close()
 
 
 # ============================================================
-# 10. BACKTEST SEDERHANA
+# 12. BACKTEST (opsional)
 # ============================================================
 
 async def backtest(csv_file: str, cfg: Config):
     """
-    Format CSV kolom:
-      timestamp,mint,price,bonding_pct,volume_buys,volume_sells,
-      unique_buyers,top10_pct,lp_locked,liquidity,dev_pct
+    Format CSV: timestamp,mint,price,bonding_pct,volume_buys,volume_sells,
+                unique_buyers,top10_pct,lp_locked,liquidity,dev_pct
     """
     scorer = FastScorer(cfg)
     wins, losses, pnls = 0, 0, []
@@ -1017,30 +1268,33 @@ async def backtest(csv_file: str, cfg: Config):
                 volume_buys=float(row["volume_buys"]),
                 volume_sells=float(row["volume_sells"]),
             )
-            score, reasons, flags = scorer.score(t)
+            score, _, flags = scorer.score(t)
             if flags:
                 continue
             if score >= cfg.min_conviction_score:
-                # Simulasi exit sederhana; sesuaikan dengan harga selanjutnya.
-                # Placeholder: hitung win/loss berdasarkan aturan TP/SL.
-                pass
+                pass  # simulasi exit di sini
 
     total = wins + losses
     win_rate = wins / total * 100 if total else 0
     avg_pnl = sum(pnls) / len(pnls) if pnls else 0
-    print(
-        f"[backtest] signals={total} win_rate={win_rate:.1f}% "
-        f"avg_pnl={avg_pnl:.2f}%"
-    )
+    print(f"[backtest] signals={total} win_rate={win_rate:.1f}% avg_pnl={avg_pnl:.2f}%")
 
 
 # ============================================================
-# 11. ENTRY POINT
+# 13. ENTRY POINT + SIGTERM HANDLER (Render)
 # ============================================================
 
 async def main():
     cfg = Config()
     scanner = HitAndRunScanner(cfg)
+
+    def handle_shutdown(signum, frame):
+        print(f"[shutdown] signal {signum} diterima, menutup scanner...")
+        scanner.running = False
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
+
     await scanner.run()
 
 
