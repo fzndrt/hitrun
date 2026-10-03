@@ -57,7 +57,7 @@ class Config:
     enable_post_migration: bool = True
     min_market_cap_usd: float = 15_000      # dari 30k → 15k
     max_market_cap_usd: float = 5_000_000   # dari 500k → 5M
-    max_pool_age_minutes: int = 360         # 60 → 360 (6 jam)
+    max_pool_age_minutes: int = 1440         # 60 → 360 (24 jam)
     min_pool_liquidity_usd: float = 8_000   # dari 20k → 8k
     enable_post_migration_rescan: bool = True
 
@@ -139,11 +139,33 @@ class Config:
     enable_raydium: bool = False
     enable_meteora: bool = False
 
-    # --- DEXSCREENER DISCOVERY (BARU — memperluas coverage) ---
+        # --- DEXSCREENER DISCOVERY (DIPERLUAS) ---
     enable_dexscreener_discovery: bool = True
     discovery_interval_sec: int = 30
-    discovery_queries: Tuple[str, ...] = ("SOL", "PUMP", "RAY", "METEORA", "USDC")
-    discovery_max_per_query: int = 40
+    discovery_queries: Tuple[str, ...] = (
+        "SOL", "PUMP", "RAY", "METEORA", "USDC",
+        "AI", "TRUMP", "DOGE", "PEPE", "CAT",
+        "BONK", "WIF", "MEME", "MOON", "SHIB",
+    )
+    discovery_max_per_query: int = 50
+
+    # --- NEW POOLS DISCOVERY (BARU — deteksi koin baru lewat endpoint) ---
+    enable_new_pools_discovery: bool = True
+    new_pools_interval_sec: int = 20
+    dexscreener_new_pools_url: str = (
+        "https://api.dexscreener.com/token-profiles/latest/v1"
+    )
+
+    # --- MIGRATION FALLBACK POLLER (BARU — anti event migrate hilang) ---
+    enable_migration_poller: bool = True
+    migration_poll_interval_sec: int = 45
+    migration_poll_track_hours: int = 24       # cek koin bonded 24 jam terakhir
+    migration_poll_min_bonding: float = 80.0   # koin dengan bonding >80% = kandidat migrate
+
+    # --- TOKEN-2022 (BARU) ---
+    enable_token2022_rpc_check: bool = True    # cek authority via RPC langsung
+    token2022_program_id: str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+    token_program_id: str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
     # --- Endpoint GRATIS ---
     threews_api_url: str = "https://three.ws/api/crypto"
@@ -254,6 +276,10 @@ class TokenState:
 
     # Pump.fun trap
     dev_sold_pct: float = 0.0
+
+    # Token-2022 (BARU)
+    is_token_2022: bool = False
+    is_from_dexscreener_pool: bool = False   # untuk koin yang masuk via new_pools 
 
     # Rescan
     rescan_count: int = 0
@@ -541,10 +567,96 @@ class RpcClient:
         self.cache.set(f"sec:{mint}", data)
         return data
 
-    async def get_token_authorities(self, mint: str) -> Tuple[bool, bool]:
+        async def get_token_authorities(self, mint: str) -> Tuple[bool, bool]:
+        """
+        Cek mint authority & freeze authority via RPC getAccountInfo.
+        Support standard SPL Token dan Token-2022.
+        Return: (mint_authority_active, freeze_authority_active)
+        """
+        if not self.cfg.enable_token2022_rpc_check:
+            # Fallback ke RugCheck (cara lama)
+            report = await self.get_security_report(mint)
+            token = report.get("token", {}) or {}
+            return bool(token.get("mintAuthority")), bool(token.get("freezeAuthority"))
+
+        cached = self.cache.get(f"auth:{mint}", 30)
+        if cached is not None:
+            return cached
+
+        # Coba Token program dulu, lalu Token-2022
+        for program_id in (self.cfg.token_program_id, self.cfg.token2022_program_id):
+            result = await self._get_account_info_authority(mint, program_id)
+            if result is not None:
+                self.cache.set(f"auth:{mint}", result)
+                return result
+
+        # Fallback ke RugCheck
         report = await self.get_security_report(mint)
         token = report.get("token", {}) or {}
-        return bool(token.get("mintAuthority")), bool(token.get("freezeAuthority"))
+        result = (bool(token.get("mintAuthority")), bool(token.get("freezeAuthority")))
+        self.cache.set(f"auth:{mint}", result)
+        return result
+
+    async def _get_account_info_authority(
+        self, mint: str, program_id: str
+    ) -> Optional[Tuple[bool, bool]]:
+        """
+        Ambil mint authority & freeze authority langsung dari akun mint.
+        Return None jika gagal / akun bukan milik program ini.
+        """
+        payload = {
+            "jsonrpc": "2.0", "id": "1",
+            "method": "getAccountInfo",
+            "params": [
+                mint,
+                {"encoding": "jsonParsed", "commitment": "confirmed"},
+            ],
+        }
+        async with self.sem:
+            try:
+                async with self.session.post(
+                    self.cfg.holder_rpc_url, json=payload
+                ) as resp:
+                    data = await resp.json()
+            except Exception:
+                return None
+
+        value = (data.get("result") or {}).get("value")
+        if not value:
+            return None
+
+        # Cek apakah akun milik program yang diharapkan
+        owner = value.get("owner", "")
+        if owner != program_id:
+            return None
+
+        parsed = (value.get("data") or {}).get("parsed") or {}
+        info = parsed.get("info") or {}
+
+        mint_auth = info.get("mintAuthority")
+        freeze_auth = info.get("freezeAuthority")
+
+        return (bool(mint_auth), bool(freeze_auth))
+
+    async def is_token_2022(self, mint: str) -> bool:
+        """Cek apakah token menggunakan program Token-2022."""
+        payload = {
+            "jsonrpc": "2.0", "id": "1",
+            "method": "getAccountInfo",
+            "params": [mint, {"encoding": "jsonParsed"}],
+        }
+        async with self.sem:
+            try:
+                async with self.session.post(
+                    self.cfg.holder_rpc_url, json=payload
+                ) as resp:
+                    data = await resp.json()
+            except Exception:
+                return False
+        value = (data.get("result") or {}).get("value")
+        if not value:
+            return False
+        return value.get("owner", "") == self.cfg.token2022_program_id
 
     async def get_transfer_fee(self, mint: str) -> float:
         report = await self.get_security_report(mint)
@@ -789,7 +901,79 @@ class RpcClient:
         }
         self.cache.set(f"pool:{mint}", result)
         return result
+       # ---------- DISCOVERY TAMBAHAN (BARU) ----------
 
+    async def get_new_pools_from_dexscreener(self) -> List[str]:
+        """
+        Ambil daftar mint dari DexScreener 'token-profiles/latest'.
+        Ini menangkap koin baru tanpa bergantung pada query nama.
+        """
+        mints: List[str] = []
+        try:
+            url = self.cfg.dexscreener_new_pools_url
+            async with self.sem:
+                async with self.session.get(url) as resp:
+                    if resp.status != 200:
+                        return mints
+                    items = await resp.json()
+            for it in (items or [])[:80]:
+                if it.get("chainId") == "solana":
+                    addr = it.get("tokenAddress")
+                    if addr:
+                        mints.append(addr)
+        except Exception:
+            pass
+        return mints
+
+    # ---------- MIGRATION FALLBACK (BARU) ----------
+
+    async def check_migration_status(self, mint: str) -> Optional[dict]:
+        """
+        Cek apakah token sudah migrate ke DEX (via DexScreener).
+        Dipakai sebagai fallback kalau event migrate PumpPortal terlewat.
+
+        Return dict jika sudah ada pool, None jika belum.
+        """
+        cached = self.cache.get(f"migstat:{mint}", 45)
+        if cached is not None:
+            return cached if cached != {} else None
+
+        url = f"{self.cfg.dexscreener_url}/{mint}"
+        async with self.sem:
+            try:
+                async with self.session.get(url) as resp:
+                    if resp.status != 200:
+                        self.cache.set(f"migstat:{mint}", {})
+                        return None
+                    data = await resp.json()
+            except Exception:
+                self.cache.set(f"migstat:{mint}", {})
+                return None
+
+        pairs = data.get("pairs", []) or []
+        # Filter hanya pool dengan likuiditas > 0
+        valid = [
+            p for p in pairs
+            if float(p.get("liquidity", {}).get("usd", 0) or 0) > 1000
+        ]
+        if not valid:
+            self.cache.set(f"migstat:{mint}", {})
+            return None
+
+        best = max(
+            valid,
+            key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0),
+        )
+        result = {
+            "pool_address": best.get("pairAddress", ""),
+            "dex_id": best.get("dexId", ""),
+            "liquidity_usd": float(best.get("liquidity", {}).get("usd", 0) or 0),
+            "market_cap": float(best.get("marketCap", 0) or best.get("fdv", 0) or 0),
+            "price": float(best.get("priceUsd", 0) or 0),
+            "created_at": float(best.get("pairCreatedAt", 0) or 0) / 1000.0,
+        }
+        self.cache.set(f"migstat:{mint}", result)
+        return result
 
 # ============================================================
 # 5. SECURITY ANALYZER
@@ -1584,6 +1768,14 @@ class HitAndRunScanner:
                 except Exception:
                     pass
 
+                                # 4. DexScreener NEW POOLS — tangkap koin tanpa ketergantungan nama
+                if self.cfg.enable_new_pools_discovery:
+                    try:
+                        new_mints = await self.rpc.get_new_pools_from_dexscreener()
+                        mints.extend(new_mints)
+                    except Exception:
+                        pass
+                            
                 mints = list(dict.fromkeys(mints))
                 added = 0
                 for mint in mints:
@@ -1884,7 +2076,66 @@ class HitAndRunScanner:
     # --------------------------------------------------------
     # 11.4 RESCAN LOOP
     # --------------------------------------------------------
+        async def migration_poller(self):
+        """
+        Fallback deteksi migrasi: cek token yang sudah bonding tinggi
+        tapi belum is_migrated. Kalau sudah ada pool di DexScreener,
+        tandai sebagai migrated.
+        """
+        if not self.cfg.enable_migration_poller:
+            return
+        print("[migration-poller] started")
+        while self.running:
+            try:
+                now = time.time()
+                candidates: List[str] = []
+                for mint, t in list(self.tokens.items()):
+                    if t.is_migrated or t.signal_emitted:
+                        continue
+                    age_hours = (now - t.created_at) / 3600.0
+                    if age_hours > self.cfg.migration_poll_track_hours:
+                        continue
+                    # Kandidat: bonding_pct tinggi ATAU sumber pumpfun
+                    if (
+                        t.source == "pumpfun"
+                        and t.bonding_pct >= self.cfg.migration_poll_min_bonding
+                    ):
+                        candidates.append(mint)
 
+                for mint in candidates[:50]:
+                    t = self.tokens.get(mint)
+                    if not t or t.is_migrated:
+                        continue
+                    status = await self.rpc.check_migration_status(mint)
+                    if not status:
+                        continue
+
+                    t.is_migrated = True
+                    t.pool_address = status.get("pool_address", "")
+                    t.migration_detected_at = now
+                    t.market_cap_usd = status.get("market_cap", 0.0)
+                    if status.get("liquidity_usd", 0) > 0:
+                        t.liquidity_usd = status["liquidity_usd"]
+                    if status.get("price", 0) > 0:
+                        t.price = status["price"]
+                        self.price_history[mint].append((now, t.price))
+
+                    created_at_pool = status.get("created_at", 0.0)
+                    if created_at_pool > 0:
+                        t.pool_age_minutes = (now - created_at_pool) / 60.0
+
+                    # Reset agar dievaluasi ulang dalam mode post-migration
+                    t.scored = False
+                    t.signal_emitted = False
+                    await self.eval_queue.put(mint)
+                    print(
+                        f"[migration-poller] detected {mint} → "
+                        f"pool {t.pool_address} via {status.get('dex_id', '')}"
+                    )
+            except Exception as e:
+                print(f"[migration-poller-error] {e}")
+            await asyncio.sleep(self.cfg.migration_poll_interval_sec)
+                
     async def rescan_loop(self):
         while self.running:
             try:
@@ -1993,6 +2244,7 @@ class HitAndRunScanner:
         tasks = [
             asyncio.create_task(self.pumpportal_listener()),
             asyncio.create_task(self.dexscreener_discovery_loop()),
+            asyncio.create_task(self.migration_poller()),      # ← BARU
             asyncio.create_task(self.signal_consumer()),
             asyncio.create_task(self.monitor_loop()),
             asyncio.create_task(self.rescan_loop()),
