@@ -37,7 +37,7 @@ from typing import Dict, List, Optional, Tuple, Set
 
 @dataclass
 class Config:
-        # --- Jendela observasi & rescan (DIPERPANJANG) ---
+    # --- Jendela observasi & rescan (DIPERPANJANG) ---
     observation_window_sec: int = 25
     min_age_sec: int = 3
     enable_rescan: bool = True              # ← TAMBAHKAN INI
@@ -139,7 +139,7 @@ class Config:
     enable_raydium: bool = False
     enable_meteora: bool = False
 
-        # --- DEXSCREENER DISCOVERY (DIPERLUAS) ---
+    # --- DEXSCREENER DISCOVERY (DIPERLUAS) ---
     enable_dexscreener_discovery: bool = True
     discovery_interval_sec: int = 30
     discovery_queries: Tuple[str, ...] = (
@@ -567,7 +567,7 @@ class RpcClient:
         self.cache.set(f"sec:{mint}", data)
         return data
 
-            async def get_token_authorities(self, mint: str) -> Tuple[bool, bool]:
+    async def get_token_authorities(self, mint: str) -> Tuple[bool, bool]:
         """
         Cek mint authority & freeze authority via RPC getAccountInfo.
         Support standard SPL Token dan Token-2022.
@@ -597,7 +597,7 @@ class RpcClient:
         self.cache.set(f"auth:{mint}", result)
         return result
 
-        async def _get_account_info_authority(
+    async def _get_account_info_authority(
         self, mint: str, program_id: str
     ) -> Optional[Tuple[bool, bool]]:
         """
@@ -901,7 +901,8 @@ class RpcClient:
         }
         self.cache.set(f"pool:{mint}", result)
         return result
-       # ---------- DISCOVERY TAMBAHAN (BARU) ----------
+
+    # ---------- DISCOVERY TAMBAHAN (BARU) ----------
 
     async def get_new_pools_from_dexscreener(self) -> List[str]:
         """
@@ -1768,14 +1769,14 @@ class HitAndRunScanner:
                 except Exception:
                     pass
 
-                                # 4. DexScreener NEW POOLS — tangkap koin tanpa ketergantungan nama
+                # 4. DexScreener NEW POOLS — tangkap koin tanpa ketergantungan nama
                 if self.cfg.enable_new_pools_discovery:
                     try:
                         new_mints = await self.rpc.get_new_pools_from_dexscreener()
                         mints.extend(new_mints)
                     except Exception:
                         pass
-                            
+
                 mints = list(dict.fromkeys(mints))
                 added = 0
                 for mint in mints:
@@ -2074,9 +2075,10 @@ class HitAndRunScanner:
         return 0.0
 
     # --------------------------------------------------------
-    # 11.4 RESCAN LOOP
+    # 11.4 MIGRATION POLLER & RESCAN LOOP
     # --------------------------------------------------------
-        async def migration_poller(self):
+
+    async def migration_poller(self):
         """
         Fallback deteksi migrasi: cek token yang sudah bonding tinggi
         tapi belum is_migrated. Kalau sudah ada pool di DexScreener,
@@ -2135,7 +2137,7 @@ class HitAndRunScanner:
             except Exception as e:
                 print(f"[migration-poller-error] {e}")
             await asyncio.sleep(self.cfg.migration_poll_interval_sec)
-                
+
     async def rescan_loop(self):
         while self.running:
             try:
