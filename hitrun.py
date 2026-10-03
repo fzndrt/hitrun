@@ -1,17 +1,11 @@
 # ============================================================
-# HITRUN.PY — Hit-and-Run Scanner v7 (FINAL)
+# HITRUN.PY — Hit-and-Run Scanner v8 (FINAL)
 # ============================================================
-# Fokus v7:
-#  - COVERAGE: multi-source discovery (PumpPortal WS + DexScreener poller
-#              + Raydium pools + boosts/profiles). ~250-400 koin/putaran.
-#  - POST-GRAD: jendela diperpanjang ke 6 jam. Fokus entry di awal,
-#               kejar koin yang baru graduate sebelum meledak.
-#  - BUYER QUALITY: toleransi buyer sepi ASAL bukan bot. Hitung bot-ratio
-#                   dari buyer (fresh wallet + micro balance + balance match).
-#  - PUMP.FUN TRAP: dev-sell check, migration sniper check, bonding progres.
-#  - SECURITY lengkap: authority, freeze, honeypot, tax, metadata,
-#                      creator rep, LP lock, cluster/funding graph.
-#  - Telegram: hanya signal & exit yang lolos filter.
+# Perubahan v8:
+#  - Discovery diperluas: Pump.fun frontend API + Watchlist
+#  - Migration poller lebih luas (semua pumpfun/dexscreener)
+#  - Post-migration window 7 hari
+#  - Semua modul keamanan v7 tetap utuh
 # ============================================================
 
 import asyncio
@@ -37,13 +31,13 @@ from typing import Dict, List, Optional, Tuple, Set
 
 @dataclass
 class Config:
-    # --- Jendela observasi & rescan (DIPERPANJANG) ---
+    # --- Jendela observasi & rescan ---
     observation_window_sec: int = 25
     min_age_sec: int = 3
-    enable_rescan: bool = True              # ← TAMBAHKAN INI
-    rescan_delay_sec: int = 30              # dari 60 → 30
-    max_rescan_count: int = 20              # dari 5 → 20
-    max_rescan_age_sec: int = 21600         # 15 menit → 6 JAM
+    enable_rescan: bool = True
+    rescan_delay_sec: int = 30
+    max_rescan_count: int = 20
+    max_rescan_age_sec: int = 21600
 
     # --- Filter harga ---
     max_price_pump_5m_pct: float = 60.0
@@ -53,28 +47,28 @@ class Config:
     min_bonding_pct: float = 2.0
     max_bonding_pct: float = 40.0
 
-    # --- Post-graduation (DIPERPANJANG) ---
+    # --- Post-graduation ---
     enable_post_migration: bool = True
-    min_market_cap_usd: float = 15_000      # dari 30k → 15k
-    max_market_cap_usd: float = 5_000_000   # dari 500k → 5M
-    max_pool_age_minutes: int = 1440         # 60 → 360 (24 jam)
-    min_pool_liquidity_usd: float = 8_000   # dari 20k → 8k
+    min_market_cap_usd: float = 15_000
+    max_market_cap_usd: float = 5_000_000
+    max_pool_age_minutes: int = 10080        # ← EDIT 1: 1440 → 10080 (7 hari)
+    min_pool_liquidity_usd: float = 8_000
     enable_post_migration_rescan: bool = True
 
-    # --- Likuiditas & holder (DILONGGARKAN) ---
-    min_liquidity_usd: float = 5_000        # dari 15k → 5k
+    # --- Likuiditas & holder ---
+    min_liquidity_usd: float = 5_000
     max_top10_holder_pct: float = 28.0
     max_top1_holder_pct: float = 4.0
     max_dev_holding_pct: float = 5.0
-    min_holders_count: int = 10             # dari 50 → 10
+    min_holders_count: int = 10
     require_lp_locked: bool = True
     min_lp_locked_pct: float = 90.0
     max_rugcheck_score: float = 65.0
 
-    # --- Authority & metadata (WAJIB) ---
+    # --- Authority & metadata ---
     require_mint_authority_revoked: bool = True
     require_freeze_authority_revoked: bool = True
-    require_metadata_immutable: bool = False  # longgarkan, banyak koin pakai mutable
+    require_metadata_immutable: bool = False
 
     # --- Tax / fee ---
     max_transfer_fee_pct: float = 5.0
@@ -91,13 +85,13 @@ class Config:
     max_micro_wallet_count: int = 25
     micro_wallet_balance_sol: float = 0.02
 
-    # --- BUYER QUALITY (BARU — pengganti filter "unique buyers") ---
+    # --- BUYER QUALITY ---
     enable_buyer_quality_check: bool = True
-    min_real_buyers: int = 3                # minimal 3 buyer ASLI
-    max_bot_ratio: float = 0.6              # max 60% bot dari buyer
+    min_real_buyers: int = 3
+    max_bot_ratio: float = 0.6
     buyer_age_threshold_hours: float = 24.0
-    buyer_balance_min_sol: float = 0.05     # di bawah ini = micro/bot
-    max_early_buyers_check: int = 30        # analisa 30 buyer pertama
+    buyer_balance_min_sol: float = 0.05
+    max_early_buyers_check: int = 30
 
     # --- Wallet cluster ---
     enable_wallet_cluster_check: bool = True
@@ -112,14 +106,14 @@ class Config:
     max_sniper_wallets: int = 8
     sniper_window_sec: int = 10
 
-    # --- PUMP.FUN TRAP (BARU) ---
+    # --- PUMP.FUN TRAP ---
     enable_dev_sell_check: bool = True
     enable_migration_sniper_check: bool = True
-    max_dev_sell_pct: float = 0.0           # dev tidak boleh jual sama sekali
+    max_dev_sell_pct: float = 0.0
     max_migration_snipers: int = 5
 
     # --- Skor minimum ---
-    min_conviction_score: float = 60.0      # dari 65 → 60
+    min_conviction_score: float = 60.0
 
     # --- Manajemen posisi ---
     position_size_pct: float = 2.5
@@ -139,7 +133,7 @@ class Config:
     enable_raydium: bool = False
     enable_meteora: bool = False
 
-    # --- DEXSCREENER DISCOVERY (DIPERLUAS) ---
+    # --- DEXSCREENER DISCOVERY ---
     enable_dexscreener_discovery: bool = True
     discovery_interval_sec: int = 30
     discovery_queries: Tuple[str, ...] = (
@@ -149,21 +143,34 @@ class Config:
     )
     discovery_max_per_query: int = 50
 
-    # --- NEW POOLS DISCOVERY (BARU — deteksi koin baru lewat endpoint) ---
+    # --- WATCHLIST & PUMP.FUN API (EDIT 2 — sisipan baru) ---
+    enable_watchlist: bool = True
+    watchlist_mints: Tuple[str, ...] = (
+        # Isi mint yang ingin selalu dipantau di sini:
+        # "fCUBpdeRn76xfRaa4UPHDauGeRG3EvMB3MjuRgdpump",
+    )
+
+    enable_pumpfun_api_discovery: bool = True
+    pumpfun_api_url: str = (
+        "https://frontend-api-v3.pump.fun/coins"
+        "?offset=0&limit=50&sort=created&order=DESC&includeNsfw=false"
+    )
+
+    # --- NEW POOLS DISCOVERY ---
     enable_new_pools_discovery: bool = True
     new_pools_interval_sec: int = 20
     dexscreener_new_pools_url: str = (
         "https://api.dexscreener.com/token-profiles/latest/v1"
     )
 
-    # --- MIGRATION FALLBACK POLLER (BARU — anti event migrate hilang) ---
+    # --- MIGRATION FALLBACK POLLER ---
     enable_migration_poller: bool = True
     migration_poll_interval_sec: int = 45
-    migration_poll_track_hours: int = 24       # cek koin bonded 24 jam terakhir
-    migration_poll_min_bonding: float = 80.0   # koin dengan bonding >80% = kandidat migrate
+    migration_poll_track_hours: int = 24
+    migration_poll_min_bonding: float = 80.0
 
-    # --- TOKEN-2022 (BARU) ---
-    enable_token2022_rpc_check: bool = True    # cek authority via RPC langsung
+    # --- TOKEN-2022 ---
+    enable_token2022_rpc_check: bool = True
     token2022_program_id: str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
     token_program_id: str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
@@ -184,7 +191,7 @@ class Config:
     )
 
     # --- Worker & cache ---
-    worker_count: int = 16                  # dari 8 → 16 (coverage lebih besar)
+    worker_count: int = 16
     rpc_semaphore: int = 16
     evaluate_interval_sec: float = 1.0
     monitor_interval_sec: float = 2.0
@@ -255,7 +262,7 @@ class TokenState:
     creator_rugpull_count: int = 0
     micro_wallet_count: int = 0
 
-    # Buyer quality (BARU)
+    # Buyer quality
     real_buyers: int = 0
     bot_buyers: int = 0
     bot_ratio: float = 0.0
@@ -277,9 +284,9 @@ class TokenState:
     # Pump.fun trap
     dev_sold_pct: float = 0.0
 
-    # Token-2022 (BARU)
+    # Token-2022
     is_token_2022: bool = False
-    is_from_dexscreener_pool: bool = False   # untuk koin yang masuk via new_pools 
+    is_from_dexscreener_pool: bool = False
 
     # Rescan
     rescan_count: int = 0
@@ -571,10 +578,8 @@ class RpcClient:
         """
         Cek mint authority & freeze authority via RPC getAccountInfo.
         Support standard SPL Token dan Token-2022.
-        Return: (mint_authority_active, freeze_authority_active)
         """
         if not self.cfg.enable_token2022_rpc_check:
-            # Fallback ke RugCheck (cara lama)
             report = await self.get_security_report(mint)
             token = report.get("token", {}) or {}
             return bool(token.get("mintAuthority")), bool(token.get("freezeAuthority"))
@@ -583,14 +588,12 @@ class RpcClient:
         if cached is not None:
             return cached
 
-        # Coba Token program dulu, lalu Token-2022
         for program_id in (self.cfg.token_program_id, self.cfg.token2022_program_id):
             result = await self._get_account_info_authority(mint, program_id)
             if result is not None:
                 self.cache.set(f"auth:{mint}", result)
                 return result
 
-        # Fallback ke RugCheck
         report = await self.get_security_report(mint)
         token = report.get("token", {}) or {}
         result = (bool(token.get("mintAuthority")), bool(token.get("freezeAuthority")))
@@ -600,10 +603,6 @@ class RpcClient:
     async def _get_account_info_authority(
         self, mint: str, program_id: str
     ) -> Optional[Tuple[bool, bool]]:
-        """
-        Ambil mint authority & freeze authority langsung dari akun mint.
-        Return None jika gagal / akun bukan milik program ini.
-        """
         payload = {
             "jsonrpc": "2.0", "id": "1",
             "method": "getAccountInfo",
@@ -625,7 +624,6 @@ class RpcClient:
         if not value:
             return None
 
-        # Cek apakah akun milik program yang diharapkan
         owner = value.get("owner", "")
         if owner != program_id:
             return None
@@ -639,7 +637,6 @@ class RpcClient:
         return (bool(mint_auth), bool(freeze_auth))
 
     async def is_token_2022(self, mint: str) -> bool:
-        """Cek apakah token menggunakan program Token-2022."""
         payload = {
             "jsonrpc": "2.0", "id": "1",
             "method": "getAccountInfo",
@@ -713,16 +710,11 @@ class RpcClient:
             except Exception:
                 return True
 
-    # ---------- BUYER QUALITY (BARU) ----------
+    # ---------- BUYER QUALITY ----------
 
     async def analyze_buyer_quality(
         self, buyers: List[dict]
     ) -> Tuple[int, int, float]:
-        """
-        Analisa buyer awal: berapa bot, berapa asli.
-        Bot = (wallet age < threshold) OR (balance < threshold).
-        Return: (real_count, bot_count, bot_ratio)
-        """
         cached = self.cache.get(
             f"bq:{id(buyers)}", self.cfg.cache_ttl_buyer_quality_sec
         )
@@ -732,7 +724,6 @@ class RpcClient:
         if not buyers:
             return 0, 0, 0.0
 
-        # Ambil unique wallets, limit N
         wallets: List[str] = []
         seen: Set[str] = set()
         for b in buyers:
@@ -764,15 +755,11 @@ class RpcClient:
         self.cache.set(f"bq:{id(buyers)}", result)
         return result
 
-    # ---------- PUMP.FUN TRAP (BARU) ----------
+    # ---------- PUMP.FUN TRAP ----------
 
     async def check_dev_sold(
         self, mint: str, creator: str, created_at: float
     ) -> float:
-        """
-        Cek apakah dev sudah menjual token.
-        Return: persentase dari supply awal yang dijual dev (estimasi).
-        """
         if not self.cfg.enable_dev_sell_check or not creator:
             return 0.0
 
@@ -782,20 +769,16 @@ class RpcClient:
 
         sigs = await self.get_signatures(creator, limit=30)
         sold_pct = 0.0
-        # Heuristik: kalau ada signature setelah create dengan jenis sell
-        # dari wallet dev, anggap dev sudah jual sebagian.
         for s in sigs:
             bt = s.get("blockTime", 0) or 0
             if bt < created_at:
                 continue
-            # Cek tx untuk melihat jika token keluar dari dev wallet
             tx = await self.get_transaction(s["signature"])
             if not tx or not tx.get("meta"):
                 continue
             try:
                 pre = tx["meta"].get("preTokenBalances", []) or []
                 post = tx["meta"].get("postTokenBalances", []) or []
-                # Cari entry untuk mint ini di owner = creator
                 pre_amt = 0.0
                 post_amt = 0.0
                 for pb in pre:
@@ -902,13 +885,9 @@ class RpcClient:
         self.cache.set(f"pool:{mint}", result)
         return result
 
-    # ---------- DISCOVERY TAMBAHAN (BARU) ----------
+    # ---------- DISCOVERY TAMBAHAN ----------
 
     async def get_new_pools_from_dexscreener(self) -> List[str]:
-        """
-        Ambil daftar mint dari DexScreener 'token-profiles/latest'.
-        Ini menangkap koin baru tanpa bergantung pada query nama.
-        """
         mints: List[str] = []
         try:
             url = self.cfg.dexscreener_new_pools_url
@@ -926,15 +905,31 @@ class RpcClient:
             pass
         return mints
 
-    # ---------- MIGRATION FALLBACK (BARU) ----------
+    # ---------- PUMP.FUN FRONTEND DISCOVERY (EDIT 3) ----------
+
+    async def get_pumpfun_recent_coins(self) -> List[str]:
+        """Ambil daftar mint koin terbaru dari pump.fun frontend API."""
+        mints: List[str] = []
+        try:
+            url = self.cfg.pumpfun_api_url
+            async with self.sem:
+                async with self.session.get(url) as resp:
+                    if resp.status != 200:
+                        return mints
+                    items = await resp.json()
+            if not isinstance(items, list):
+                return mints
+            for it in items:
+                addr = it.get("mint") or it.get("address")
+                if addr:
+                    mints.append(addr)
+        except Exception:
+            pass
+        return mints
+
+    # ---------- MIGRATION FALLBACK ----------
 
     async def check_migration_status(self, mint: str) -> Optional[dict]:
-        """
-        Cek apakah token sudah migrate ke DEX (via DexScreener).
-        Dipakai sebagai fallback kalau event migrate PumpPortal terlewat.
-
-        Return dict jika sudah ada pool, None jika belum.
-        """
         cached = self.cache.get(f"migstat:{mint}", 45)
         if cached is not None:
             return cached if cached != {} else None
@@ -952,7 +947,6 @@ class RpcClient:
                 return None
 
         pairs = data.get("pairs", []) or []
-        # Filter hanya pool dengan likuiditas > 0
         valid = [
             p for p in pairs
             if float(p.get("liquidity", {}).get("usd", 0) or 0) > 1000
@@ -975,6 +969,7 @@ class RpcClient:
         }
         self.cache.set(f"migstat:{mint}", result)
         return result
+
 
 # ============================================================
 # 5. SECURITY ANALYZER
@@ -1015,7 +1010,6 @@ class SecurityAnalyzer:
     def detect_migration_snipers(
         self, buyers: List[dict], migration_time: float
     ) -> int:
-        """Hitung buyer yang masuk dalam 10 detik setelah migrasi."""
         if migration_time <= 0:
             return 0
         snipers = [
@@ -1177,7 +1171,6 @@ class FastScorer:
         red_flags: List[str] = []
         score = 0.0
 
-        # Momentum (max 25)
         if t.price_at_5m_ago > 0:
             pump_pct = (t.price - t.price_at_5m_ago) / t.price_at_5m_ago * 100
         else:
@@ -1188,7 +1181,6 @@ class FastScorer:
             score += min(25, pump_pct)
             reasons.append(f"momentum:{pump_pct:.1f}%")
 
-        # Buy pressure (max 25)
         total_vol = t.volume_buys + t.volume_sells
         if total_vol > 0:
             buy_ratio = t.volume_buys / total_vol
@@ -1198,7 +1190,6 @@ class FastScorer:
             elif buy_ratio < 0.35:
                 red_flags.append(f"sell_pressure:{buy_ratio:.2f}")
 
-        # BUYER QUALITY (max 30) — ganti "unique buyers"
         if self.cfg.enable_buyer_quality_check:
             if t.real_buyers >= self.cfg.min_real_buyers:
                 score += 30
@@ -1211,14 +1202,12 @@ class FastScorer:
             if t.bot_ratio > self.cfg.max_bot_ratio:
                 red_flags.append(f"bot_dominated:{t.bot_ratio:.0%}")
 
-        # Bonding (max 15)
         if self.cfg.min_bonding_pct <= t.bonding_pct <= self.cfg.max_bonding_pct:
             score += 15
             reasons.append(f"bonding_ok:{t.bonding_pct:.1f}%")
         elif t.bonding_pct > 0:
             red_flags.append(f"bonding_bad:{t.bonding_pct:.1f}%")
 
-        # Likuiditas (max 5)
         if t.liquidity_usd >= self.cfg.min_liquidity_usd:
             score += 5
             reasons.append(f"liq_ok:${t.liquidity_usd:,.0f}")
@@ -1230,28 +1219,24 @@ class FastScorer:
         red_flags: List[str] = []
         score = 0.0
 
-        # Market cap (max 25)
         if self.cfg.min_market_cap_usd <= t.market_cap_usd <= self.cfg.max_market_cap_usd:
             score += 25
             reasons.append(f"mcap_ok:${t.market_cap_usd:,.0f}")
         else:
             red_flags.append(f"mcap_out:${t.market_cap_usd:,.0f}")
 
-        # Pool age (max 20) — pool baru/muda = momentum segar
         if t.pool_age_minutes <= self.cfg.max_pool_age_minutes:
             score += 20
             reasons.append(f"pool_age:{t.pool_age_minutes:.0f}min")
         else:
             red_flags.append(f"pool_too_old:{t.pool_age_minutes:.0f}min")
 
-        # Liquidity (max 20)
         if t.liquidity_usd >= self.cfg.min_pool_liquidity_usd:
             score += 20
             reasons.append(f"pool_liq:${t.liquidity_usd:,.0f}")
         else:
             red_flags.append(f"pool_liq_low:${t.liquidity_usd:,.0f}")
 
-        # Buy pressure (max 20)
         total_vol = t.volume_buys + t.volume_sells
         if total_vol > 0:
             buy_ratio = t.volume_buys / total_vol
@@ -1259,7 +1244,6 @@ class FastScorer:
             if buy_ratio > 0.55:
                 reasons.append(f"buy_pressure:{buy_ratio:.2f}")
 
-        # Holder count (max 10)
         hc = len(t.holders)
         if hc >= 200:
             score += 10
@@ -1271,7 +1255,6 @@ class FastScorer:
         else:
             red_flags.append(f"few_holders:{hc}")
 
-        # Momentum (max 5)
         if t.price_at_5m_ago > 0:
             pump_pct = (t.price - t.price_at_5m_ago) / t.price_at_5m_ago * 100
             if 2 <= pump_pct <= self.cfg.max_price_pump_5m_pct:
@@ -1403,7 +1386,7 @@ class TelegramAlerter:
             print("[telegram] token/chat_id kosong, alert dinonaktifkan")
             return
         self.session = aiohttp.ClientSession()
-        await self._send("✅ <b>[HIT-AND-RUN] scanner v7 online</b>")
+        await self._send("✅ <b>[HIT-AND-RUN] scanner v8 online</b>")
 
     async def close(self):
         if self.session:
@@ -1492,16 +1475,12 @@ class TelegramAlerter:
         except Exception as e:
             print(f"[telegram-error] {e}")
 
+
 # ============================================================
-# 10b. HEALTH SERVER (untuk Render Web Service)
+# 10b. HEALTH SERVER
 # ============================================================
 
 class HealthServer:
-    """
-    HTTP server minimal agar Render Web Service mendeteksi port terbuka
-    → deploy sukses <1 menit. Bonus: bisa monitoring via browser.
-    """
-
     def __init__(self, scanner):
         self.scanner = scanner
         self.app = Flask(__name__)
@@ -1512,7 +1491,7 @@ class HealthServer:
         def index():
             return jsonify({
                 "service": "hitrun-scanner",
-                "version": "v7",
+                "version": "v8",
                 "ok": True,
                 "tokens_cached": len(self.scanner.tokens),
                 "signals_emitted": len(self.scanner.signals),
@@ -1562,8 +1541,6 @@ class HealthServer:
             })
 
     def run(self, port: int):
-        # use_reloader=False penting: kalau True, Flask spawn proses ganda
-        # dan scanner akan jalan 2x → duplikat alert!
         self.app.run(
             host="0.0.0.0",
             port=port,
@@ -1571,7 +1548,8 @@ class HealthServer:
             use_reloader=False,
             threaded=True,
         )
-        
+
+
 # ============================================================
 # 11. SCANNER UTAMA
 # ============================================================
@@ -1705,7 +1683,7 @@ class HitAndRunScanner:
                 t.liquidity_usd = max(t.liquidity_usd, v_sol * 150)
 
     # --------------------------------------------------------
-    # 11.2 DEXSCREENER DISCOVERY (BARU — memperluas coverage)
+    # 11.2 DEXSCREENER DISCOVERY (EDIT 4 — sumber 5 & 6 ditambah)
     # --------------------------------------------------------
 
     async def dexscreener_discovery_loop(self):
@@ -1769,13 +1747,25 @@ class HitAndRunScanner:
                 except Exception:
                     pass
 
-                # 4. DexScreener NEW POOLS — tangkap koin tanpa ketergantungan nama
+                # 4. DexScreener NEW POOLS
                 if self.cfg.enable_new_pools_discovery:
                     try:
                         new_mints = await self.rpc.get_new_pools_from_dexscreener()
                         mints.extend(new_mints)
                     except Exception:
                         pass
+
+                # 5. PUMP.FUN FRONTEND API — discovery langsung koin pump.fun
+                if self.cfg.enable_pumpfun_api_discovery:
+                    try:
+                        pump_mints = await self.rpc.get_pumpfun_recent_coins()
+                        mints.extend(pump_mints)
+                    except Exception:
+                        pass
+
+                # 6. WATCHLIST — paksa cek mint tertentu tiap putaran
+                if self.cfg.enable_watchlist and self.cfg.watchlist_mints:
+                    mints.extend(self.cfg.watchlist_mints)
 
                 mints = list(dict.fromkeys(mints))
                 added = 0
@@ -1834,9 +1824,6 @@ class HitAndRunScanner:
             self.tokens.pop(mint, None)
             return
 
-        # ====================================================
-        # PENGECEKAN PARALEL
-        # ====================================================
         (
             holders,
             lp_info,
@@ -1869,7 +1856,6 @@ class HitAndRunScanner:
         rugpull_count, _ = creator_rep
         real_buyers, bot_buyers, bot_ratio = buyer_quality
 
-        # Isi state
         t.holders = holders
         t.liquidity_usd = max(t.liquidity_usd, liq_usd)
         t.lp_locked = locked
@@ -1901,7 +1887,6 @@ class HitAndRunScanner:
                 t.price = pool_data["price"]
                 self.price_history[mint].append((now, t.price))
 
-        # Harga 5m lalu
         history = self.price_history.get(mint)
         if history and len(history) > 1:
             cutoff = now - 300
@@ -1920,13 +1905,11 @@ class HitAndRunScanner:
         )
         t.dev_holding_pct = max(dev_pct, dev_pct2)
 
-        # Migration snipers
         if t.is_migrated and self.cfg.enable_migration_sniper_check:
             t.migration_snipers = self.security.detect_migration_snipers(
                 buyers, t.migration_detected_at
             )
 
-        # Cluster analysis
         early_wallets = [b["wallet"] for b in buyers][:20]
         window_start = t.created_at - self.cfg.funding_window_hours * 3600
         window_end = t.created_at + 60
@@ -1950,9 +1933,6 @@ class HitAndRunScanner:
             if holders else 0
         )
 
-        # ====================================================
-        # RED FLAGS
-        # ====================================================
         red_flags: List[str] = []
 
         if bundle_count > self.cfg.max_bundle_wallets:
@@ -1996,7 +1976,6 @@ class HitAndRunScanner:
         if t.sells_count == 0 and age > 30 and not t.is_migrated:
             red_flags.append("no_sell_yet")
 
-        # Buyer quality (bukan filter unique buyers lagi)
         if self.cfg.enable_buyer_quality_check:
             if bot_ratio > self.cfg.max_bot_ratio:
                 red_flags.append(f"bot_ratio:{bot_ratio:.0%}")
@@ -2006,9 +1985,6 @@ class HitAndRunScanner:
         red_flags.extend(cluster_flags)
         red_flags.extend(rug_flags)
 
-        # ====================================================
-        # SKOR
-        # ====================================================
         if t.is_migrated and self.cfg.enable_post_migration:
             score, reasons, score_flags = self.scorer.score_post_migration(t)
             phase = "post_migration"
@@ -2019,9 +1995,6 @@ class HitAndRunScanner:
         red_flags.extend(score_flags)
         t.scored = True
 
-        # ====================================================
-        # SKIP: log saja
-        # ====================================================
         if red_flags:
             print(f"[skip-{phase}] {mint} score={score} flags={red_flags}")
 
@@ -2030,7 +2003,6 @@ class HitAndRunScanner:
                 and t.rescan_count < self.cfg.max_rescan_count
                 and age < self.cfg.max_rescan_age_sec
             )
-            # Post-migration: rescan lebih lama
             if t.is_migrated and self.cfg.enable_post_migration_rescan:
                 can_rescan = (
                     t.rescan_count < self.cfg.max_rescan_count
@@ -2050,9 +2022,6 @@ class HitAndRunScanner:
                 self.tokens.pop(mint, None)
             return
 
-        # ====================================================
-        # LOLOS: signal + telegram
-        # ====================================================
         if score >= self.cfg.min_conviction_score:
             signal = Signal(
                 mint=mint, score=score, entry_price=t.price,
@@ -2075,15 +2044,10 @@ class HitAndRunScanner:
         return 0.0
 
     # --------------------------------------------------------
-    # 11.4 MIGRATION POLLER & RESCAN LOOP
+    # 11.4 MIGRATION POLLER (EDIT 5 — longgarkan kandidat) & RESCAN
     # --------------------------------------------------------
 
     async def migration_poller(self):
-        """
-        Fallback deteksi migrasi: cek token yang sudah bonding tinggi
-        tapi belum is_migrated. Kalau sudah ada pool di DexScreener,
-        tandai sebagai migrated.
-        """
         if not self.cfg.enable_migration_poller:
             return
         print("[migration-poller] started")
@@ -2097,11 +2061,10 @@ class HitAndRunScanner:
                     age_hours = (now - t.created_at) / 3600.0
                     if age_hours > self.cfg.migration_poll_track_hours:
                         continue
-                    # Kandidat: bonding_pct tinggi ATAU sumber pumpfun
-                    if (
-                        t.source == "pumpfun"
-                        and t.bonding_pct >= self.cfg.migration_poll_min_bonding
-                    ):
+                    # EDIT 5: longgarkan filter kandidat
+                    if t.source in ("pumpfun", "dexscreener"):
+                        candidates.append(mint)
+                    elif t.bonding_pct > 0:
                         candidates.append(mint)
 
                 for mint in candidates[:50]:
@@ -2126,7 +2089,6 @@ class HitAndRunScanner:
                     if created_at_pool > 0:
                         t.pool_age_minutes = (now - created_at_pool) / 60.0
 
-                    # Reset agar dievaluasi ulang dalam mode post-migration
                     t.scored = False
                     t.signal_emitted = False
                     await self.eval_queue.put(mint)
@@ -2246,7 +2208,7 @@ class HitAndRunScanner:
         tasks = [
             asyncio.create_task(self.pumpportal_listener()),
             asyncio.create_task(self.dexscreener_discovery_loop()),
-            asyncio.create_task(self.migration_poller()),      # ← BARU
+            asyncio.create_task(self.migration_poller()),
             asyncio.create_task(self.signal_consumer()),
             asyncio.create_task(self.monitor_loop()),
             asyncio.create_task(self.rescan_loop()),
@@ -2268,7 +2230,7 @@ class HitAndRunScanner:
 
 
 # ============================================================
-# 12. BACKTEST (placeholder)
+# 12. BACKTEST
 # ============================================================
 
 async def backtest(csv_file: str, cfg: Config):
@@ -2302,7 +2264,6 @@ async def main():
     cfg = Config()
     scanner = HitAndRunScanner(cfg)
 
-    # ---- HEALTH SERVER untuk Render Web Service ----
     port = int(os.getenv("PORT", "10000"))
     health = HealthServer(scanner)
     health_thread = threading.Thread(
@@ -2310,7 +2271,6 @@ async def main():
     )
     health_thread.start()
     print(f"[web] health server listening on :{port}")
-    # ------------------------------------------------
 
     def handle_shutdown(signum, frame):
         print(f"[shutdown] signal {signum}, menutup scanner...")
