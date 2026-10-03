@@ -567,7 +567,7 @@ class RpcClient:
         self.cache.set(f"sec:{mint}", data)
         return data
 
-        async def get_token_authorities(self, mint: str) -> Tuple[bool, bool]:
+            async def get_token_authorities(self, mint: str) -> Tuple[bool, bool]:
         """
         Cek mint authority & freeze authority via RPC getAccountInfo.
         Support standard SPL Token dan Token-2022.
