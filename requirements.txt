@@ -1,3 +1,19 @@
-Flask
-requests
-gunicorn
+# ============================================================
+# Hit-and-Run Scanner — Render Deployment
+# Python 3.11.x (lihat catatan versi di bawah)
+# ============================================================
+
+# --- Core runtime (WAJIB) ---
+aiohttp==3.9.5
+websockets==12.0
+
+# --- Keep-alive & health (opsional, tapi disarankan untuk Render) ---
+# Render Free tier mematikan worker setelah 15 menit idle.
+# aiohttp sudah cukup untuk membuat HTTP server kecil sebagai keep-alive.
+# Tidak perlu dependency tambahan jika Anda pakai aiohttp.web.
+
+# --- Logging terstruktur (opsional) ---
+# structlog==24.1.0
+
+# --- Monitoring error (opsional) ---
+# sentry-sdk==2.13.0
