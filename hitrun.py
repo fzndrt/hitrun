@@ -70,8 +70,21 @@ class Config:
     max_top1_holder_pct: float = 12.0
     max_dev_holding_pct: float = 6.5
     max_dev_sell_pct: float = 40.0
-    min_holders_count: int = 8
     max_rugcheck_score: float = 70.0
+
+    # --- Syarat Mutlak Koin Hidup (Anti-Ghost & Anti-Koin Langsung Mati) ---
+    min_holders_count: int = 10               # Wajib minimal 10 pemegang asli (bukan ghost token)
+    min_dex_holders_count: int = 16           # Di DEX pool wajib minimal 16 pemegang asli
+    min_unique_buyers_count: int = 5          # Minimal 5 pembeli unik berbeda
+    min_organic_buys_m5: int = 6              # Minimal 6 transaksi beli di 5 menit terakhir
+    min_volume_buys_sol: float = 4.0          # Minimal 4 SOL akumulasi pembelian nyata
+
+    # --- ANTI-DEV LINKAGE & INDEPENDENT BUYER VERIFICATION ---
+    enable_dev_linkage_check: bool = True
+    max_dev_linked_holding_pct: float = 8.0   # Akumulasi holding dev + dompet afiliasi dev
+    min_unlinked_holders_count: int = 8       # Wajib minimal 8 holder yang 100% independen dari dev
+    min_unlinked_dex_holders_count: int = 14  # Wajib minimal 14 holder independen di DEX pool
+    min_unlinked_buyers_count: int = 4        # Wajib minimal 4 pembeli unik independen (tidak terkait dev)
 
     # ========================================================
     # ANTI-CABAL SYBIL MULTI-WALLET (Solusi Developer Pecah Dompet)
@@ -216,6 +229,12 @@ class TokenState:
     is_wash_trading: bool = False
     wash_flags: List[str] = field(default_factory=list)
     pool_vaults: Set[str] = field(default_factory=set)
+
+    # Dev Linkage & Unlinked Independents
+    dev_linked_wallets: Set[str] = field(default_factory=set)
+    dev_linked_holding_pct: float = 0.0
+    unlinked_holders_count: int = 0
+    unlinked_buyers_count: int = 0
 
     liquidity_velocity: float = 0.0
     holder_growth_velocity: float = 0.0
@@ -860,16 +879,18 @@ class RpcClient:
 
 
 # ============================================================
-# 5. ADVANCED ANTI-CABAL & SYBIL MULTI-WALLET DETECTOR
+# 5. ANTI-DEV LINKAGE & SYBIL CABAL DETECTOR
 # ============================================================
 
-class CabalSybilDetector:
+class DevLinkageAndSybilDetector:
     """
-    Mendeteksi developer cerdik yang memecah tokennya ke 10-20 dompet sniper.
-    Metode:
-    1. Parent Funder Graph: Melacak sumber dana SOL inbound pertama untuk top holders.
-    2. Holding Sum: Menjumlahkan akumulasi kepemilikan dompet-dompet yang berasal dari 1 funder.
-    3. Sybil Fingerprint: Mendeteksi kloning saldo persentase (misal 5 dompet masing-masing pegang 2.50%).
+    Mendeteksi keterkaitan antara Developer dengan Buyer / Holder:
+    1. Direct Funding Link: Dompet pembeli menerima transfer SOL langsung dari creator.
+    2. Common Parent Funder: Dompet pembeli dan creator didanai dari sumber wallet induk yang sama (Co-funding tree).
+    3. Direct Transaction Link: Pernah berinteraksi langsung dalam riwayat transaksi creator.
+    4. Multi-wallet Sybil Clones: Kumpulan dompet dengan saldo identik atau didanai bersamaan.
+    
+    HANYA dompet yang 100% TIDAK TERKAIT dengan developer yang dihitung sebagai pemegang/pembeli unik!
     """
     KNOWN_EXCHANGES = {
         "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9", # Binance Hot
@@ -877,6 +898,8 @@ class CabalSybilDetector:
         "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", # Bybit
         "u6T5CDtKb94epD7qWkP7CgE7nS41E7m5Xp46497BqQ8",  # OKX
         "ASTyfSima4LLAdDgoFGkgqoKowG1LZFDr9fAQrg7iaJZ", # FixedFloat
+        "39L5PtV5nLssih8p7nE12p3a9TfE2xJt7J4g18sUv18d", # Kraken
+        "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS", # KuCoin
     }
 
     def __init__(self, cfg: Config, rpc: RpcClient):
@@ -884,7 +907,14 @@ class CabalSybilDetector:
         self.rpc = rpc
 
     async def find_funder(self, wallet: str, window_start: float, window_end: float) -> Optional[str]:
+        if not wallet:
+            return None
+        cached = self.rpc.cache.get(f"funder:{wallet}", 600)
+        if cached is not None:
+            return cached
+
         sigs = await self.rpc.get_signatures(wallet, limit=15)
+        funder = None
         for s in sigs:
             bt = s.get("blockTime", 0) or 0
             if bt and (window_start <= bt <= window_end):
@@ -903,59 +933,136 @@ class CabalSybilDetector:
 
                     # Jika wallet menerima SOL
                     if post_bal[w_idx] > pre_bal[w_idx]:
-                        # Cari pengirim (yang saldonya berkurang drastis)
                         for i, key in enumerate(account_keys):
                             if i != w_idx and pre_bal[i] > post_bal[i] and (pre_bal[i] - post_bal[i]) >= 5_000_000:
-                                return key
+                                funder = key
+                                break
+                    if funder:
+                        break
                 except Exception:
                     pass
-        return None
 
-    async def detect_cabal_sybil(
-        self, holders: Dict[str, float], created_at: float, pool_vaults: Set[str]
-    ) -> Tuple[bool, float, int, List[str]]:
-        if not self.cfg.enable_cabal_sybil_check or not holders:
-            return False, 0.0, 0, []
+        self.rpc.cache.set(f"funder:{wallet}", funder)
+        return funder
+
+    async def check_direct_dev_transfer(self, wallet: str, creator: str) -> bool:
+        """Cek apakah ada riwayat transaksi langsung antara wallet dan creator"""
+        if not wallet or not creator or wallet == creator:
+            return True
+        cached = self.rpc.cache.get(f"dirdev:{wallet}:{creator}", 600)
+        if cached is not None:
+            return cached
+
+        sigs = await self.rpc.get_signatures(wallet, limit=10)
+        has_direct = False
+        for s in sigs:
+            tx = await self.rpc.get_transaction(s["signature"])
+            if not tx or not tx.get("meta"):
+                continue
+            account_keys = [k["pubkey"] if isinstance(k, dict) else k
+                            for k in tx["transaction"]["message"]["accountKeys"]]
+            if creator in account_keys:
+                has_direct = True
+                break
+
+        self.rpc.cache.set(f"dirdev:{wallet}:{creator}", has_direct)
+        return has_direct
+
+    async def analyze_dev_linkage_and_sybil(
+        self,
+        holders: Dict[str, float],
+        buyers: List[str],
+        creator: str,
+        created_at: float,
+        pool_vaults: Set[str]
+    ) -> Tuple[bool, float, Set[str], Set[str], Set[str], List[str]]:
+        """
+        Analisis mendalam keterkaitan antara Developer dengan Buyer & Holder:
+        Mengeluarkan semua dompet yang didanai dev atau satu sumber dana dengan dev.
+        """
+        if not self.cfg.enable_dev_linkage_check or not holders:
+            return False, 0.0, set(), set(holders.keys()), set(buyers), []
 
         red_flags: List[str] = []
-        # Filter keluar kolam likuiditas & vault DEX agar tidak masuk analisis cabal
         filtered_holders = {
             w: p for w, p in holders.items()
             if w not in pool_vaults and w not in KNOWN_DEX_PROGRAMS
         }
-        top_wallets = list(filtered_holders.keys())[:12]
-        if len(top_wallets) < 3:
-            return False, 0.0, 0, []
+
+        # Kumpulkan dompet yang akan diaudit (top holders + early buyers)
+        target_holders = list(filtered_holders.keys())[:15]
+        all_audit_wallets = list(dict.fromkeys(target_holders + buyers[:15]))
+        if not all_audit_wallets:
+            return False, 0.0, set(), set(), set(), []
 
         window_start = created_at - (self.cfg.cabal_funding_window_hours * 3600)
         window_end = created_at + 120
 
-        # 1. Lacak Funder Paralel
+        # Lacak Funder creator terlebih dahulu
+        creator_funder = None
+        if creator:
+            creator_funder = await self.find_funder(creator, window_start, window_end)
+
+        # Lacak Funder semua dompet target secara paralel
         funders = await asyncio.gather(
-            *[self.find_funder(w, window_start, window_end) for w in top_wallets]
+            *[self.find_funder(w, window_start, window_end) for w in all_audit_wallets]
         )
+        funder_map = dict(zip(all_audit_wallets, funders))
 
+        # 1. IDENTIFIKASI DOMPET YANG TERAFILIASI / TERKAIT DENGAN DEVELOPER
+        dev_linked_wallets: Set[str] = set()
+        if creator:
+            dev_linked_wallets.add(creator)
+
+        for w in all_audit_wallets:
+            if creator and w == creator:
+                dev_linked_wallets.add(w)
+                continue
+
+            w_funder = funder_map.get(w)
+
+            # Kasus A: Dompet didanai langsung oleh Creator
+            if creator and w_funder == creator:
+                dev_linked_wallets.add(w)
+                continue
+
+            # Kasus B: Dompet dan Creator didanai oleh dompet induk yang sama (Common Ancestor)
+            if creator_funder and w_funder and w_funder == creator_funder and w_funder not in self.KNOWN_EXCHANGES:
+                dev_linked_wallets.add(w)
+                continue
+
+        # Cek direct transfer cepat untuk top 5 holder
+        if creator:
+            direct_checks = await asyncio.gather(
+                *[self.check_direct_dev_transfer(w, creator) for w in target_holders[:5]]
+            )
+            for w, has_direct in zip(target_holders[:5], direct_checks):
+                if has_direct:
+                    dev_linked_wallets.add(w)
+
+        # 2. HITUNG AKUMULASI KEPEMILIKAN DEV + AFILIASI
+        dev_linked_holding_pct = sum(filtered_holders.get(w, 0.0) for w in dev_linked_wallets)
+        if dev_linked_holding_pct > self.cfg.max_dev_linked_holding_pct:
+            red_flags.append(f"dev_linked_insiders:{dev_linked_holding_pct:.1f}%({len(dev_linked_wallets)}wallets)")
+
+        # 3. DOMPET YANG BENAR-BENAR UNIK & INDEPENDEN (100% UNLINKED)
+        unlinked_holders = {w for w in filtered_holders.keys() if w not in dev_linked_wallets}
+        unlinked_buyers = {b for b in buyers if b not in dev_linked_wallets}
+
+        # 4. CEK JUGA CABAL NON-DEV (Syndicate antar sesama sniper non-dev)
         funder_groups: Dict[str, List[str]] = defaultdict(list)
-        for w, f in zip(top_wallets, funders):
-            if f and f not in self.KNOWN_EXCHANGES and f != w:
+        for w, f in funder_map.items():
+            if f and f not in self.KNOWN_EXCHANGES and f not in dev_linked_wallets and w not in dev_linked_wallets:
                 funder_groups[f].append(w)
-
-        max_cluster_pct = 0.0
-        max_cluster_wallets = 0
 
         for f, ws in funder_groups.items():
             if len(ws) >= 2:
-                collective_pct = sum(filtered_holders.get(w, 0.0) for w in ws)
-                if collective_pct > max_cluster_pct:
-                    max_cluster_pct = collective_pct
-                    max_cluster_wallets = len(ws)
+                cabal_pct = sum(filtered_holders.get(w, 0.0) for w in ws)
+                if cabal_pct > self.cfg.max_cabal_cluster_holding_pct:
+                    red_flags.append(f"cabal_sybil_cluster:{cabal_pct:.1f}%({len(ws)}wallets)")
 
-                # Jika satu funder mendanai kumpulan dompet yang totalnya > max_cabal_cluster_holding_pct
-                if collective_pct > self.cfg.max_cabal_cluster_holding_pct:
-                    red_flags.append(f"cabal_sybil_cluster:{collective_pct:.1f}%({len(ws)}wallets)")
-
-        # 2. Sybil Fingerprint: Dompet dengan persentase nyaris identik
-        pcts = [round(filtered_holders[w], 2) for w in top_wallets if filtered_holders[w] > 0.5]
+        # 5. SYBIL FINGERPRINT (Saldo/persentase klon identik)
+        pcts = [round(filtered_holders[w], 2) for w in unlinked_holders if filtered_holders.get(w, 0) > 0.5]
         pct_counts = defaultdict(int)
         for p in pcts:
             pct_counts[p] += 1
@@ -963,8 +1070,8 @@ class CabalSybilDetector:
             if count >= self.cfg.max_sybil_similar_wallets:
                 red_flags.append(f"sybil_balance_clones:{count}wallets_at_{p}%")
 
-        is_cabal = len(red_flags) > 0
-        return is_cabal, max_cluster_pct, max_cluster_wallets, red_flags
+        is_flagged = len(red_flags) > 0
+        return is_flagged, dev_linked_holding_pct, dev_linked_wallets, unlinked_holders, unlinked_buyers, red_flags
 
 
 # ============================================================
@@ -1236,9 +1343,10 @@ class TelegramAlerter:
             f"<b>Liquidity:</b> <code>${s.liquidity:,.0f}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<b>🛡️ Audit Anti-Jebakan:</b>\n"
-            f"  • Anti-Cabal Sybil: {'✅ Bersih' if not t.cabal_cluster_pct else f'⚠️ Cluster {t.cabal_cluster_pct:.1f}%'}\n"
+            f"  • Keterkaitan Dev: {'✅ 0 (100% Unik & Independen)' if not t.dev_linked_holding_pct else f'⚠️ {len(t.dev_linked_wallets)} Dompet Dev ({t.dev_linked_holding_pct:.1f}%)'}\n"
+            f"  • Pemegang Independen: <code>{t.unlinked_holders_count} Wallets</code>\n"
+            f"  • Pembeli Unik: <code>{t.unlinked_buyers_count} Wallets</code>\n"
             f"  • Anti-Wash Volume: {'✅ Organik' if not t.is_wash_trading else '❌ Fake Volume'}\n"
-            f"  • Trader Unik: <code>{t.unique_trader_ratio:.0%}</code>\n"
             f"  • Mint/Freeze: {'✅ Revoked' if not (t.mint_authority_active or t.freeze_authority_active) else '❌ Aktif'}\n"
             f"  • LP Status: {'✅ Terkunci/Aman' if t.lp_locked else '⚠️ Open Vault'}\n"
             f"  • Dev Holdings: <code>{t.dev_holding_pct:.1f}%</code>\n"
@@ -1283,7 +1391,7 @@ class HitAndRunScanner:
         self.cfg = cfg
         self.cache = TimedCache()
         self.rpc = RpcClient(cfg, self.cache)
-        self.cabal_detector = CabalSybilDetector(cfg, self.rpc)
+        self.cabal_detector = DevLinkageAndSybilDetector(cfg, self.rpc)
         self.wash_detector = WashTradingDetector(cfg)
         self.scorer = HitAndRunScorer(cfg)
         self.positions = PositionManager(cfg)
@@ -1340,7 +1448,8 @@ class HitAndRunScanner:
             )
             t.sol_in_bonding_history.append((time.time(), v_sol))
             self.tokens[mint] = t
-            await self.eval_queue.put(mint)
+            # JANGAN langsung lempar evaluasi di detik 0 saat holder masih 0.
+            # Token didaftarkan, dan evaluasi akan dipicu saat pembeli organik pertama masuk.
 
         elif tx_type in ("buy", "sell"):
             t = self.tokens.get(mint)
@@ -1370,6 +1479,11 @@ class HitAndRunScanner:
                 t.sol_in_bonding_history.append((time.time(), v_sol))
                 t.liquidity_usd = max(t.liquidity_usd, v_sol * 160.0)
 
+            # Evaluasi HANYA dipicu saat koin terbukti hidup & ada aktivitas pembeli nyata!
+            if not t.scored and not t.signal_emitted:
+                if t.bonding_pct >= self.cfg.min_bonding_pct and len(t.unique_buyers) >= 3:
+                    await self.eval_queue.put(mint)
+
         elif tx_type == "migrate":
             t = self.tokens.get(mint)
             if t:
@@ -1395,9 +1509,14 @@ class HitAndRunScanner:
                                     data = await resp.json()
                                     for p in (data.get("pairs", []) or [])[:self.cfg.discovery_max_per_query]:
                                         if p.get("chainId") == "solana":
-                                            addr = p.get("baseToken", {}).get("address")
-                                            if addr:
-                                                mints_discovered.append(addr)
+                                            liq_usd = float(p.get("liquidity", {}).get("usd", 0) or 0)
+                                            buys_m5 = int(p.get("txns", {}).get("m5", {}).get("buys", 0) or 0)
+                                            vol_m5 = float(p.get("volume", {}).get("m5", 0) or 0)
+                                            # Saring koin mati: Wajib likuiditas >= $3.5k dan ada aktivitas beli aktif m5
+                                            if liq_usd >= self.cfg.min_pool_liquidity_usd and buys_m5 >= self.cfg.min_organic_buys_m5 and vol_m5 >= 1000:
+                                                addr = p.get("baseToken", {}).get("address")
+                                                if addr:
+                                                    mints_discovered.append(addr)
                     except Exception:
                         pass
 
@@ -1525,12 +1644,24 @@ class HitAndRunScanner:
         if lp_pool:
             t.pool_vaults.add(lp_pool)
 
-        # 3. ADVANCED ANTI-CABAL SYBIL CHECK (Kolam Likuiditas Dikecualikan)
-        is_cabal, cabal_pct, cabal_wallets, cabal_flags = await self.cabal_detector.detect_cabal_sybil(
-            holders, t.created_at, t.pool_vaults
+        # 3. ADVANCED ANTI-DEV LINKAGE & SYBIL CABAL CHECK
+        early_wallets = [b["wallet"] for b in self.buyers_buffer.get(mint, [])]
+        (
+            is_cabal,
+            dev_linked_pct,
+            dev_linked_wallets,
+            unlinked_holders,
+            unlinked_buyers,
+            cabal_flags
+        ) = await self.cabal_detector.analyze_dev_linkage_and_sybil(
+            holders, early_wallets, t.creator, t.created_at, t.pool_vaults
         )
-        t.cabal_cluster_pct = cabal_pct
-        t.cabal_wallets_count = cabal_wallets
+        t.cabal_cluster_pct = dev_linked_pct
+        t.cabal_wallets_count = len(dev_linked_wallets)
+        t.dev_linked_wallets = dev_linked_wallets
+        t.dev_linked_holding_pct = dev_linked_pct
+        t.unlinked_holders_count = len(unlinked_holders)
+        t.unlinked_buyers_count = len(unlinked_buyers)
 
         # 4. ANTI-WASH TRADING & FAKE VOLUME CHECK
         is_wash, unique_ratio, wash_flags = self.wash_detector.evaluate_wash(
@@ -1544,10 +1675,10 @@ class HitAndRunScanner:
         t.is_wash_trading = is_wash
         t.wash_flags = wash_flags
 
-        # 5. Dev Holding & Concentration (Murni Dompet Pengguna Asli!)
+        # 5. Dev Holding & Concentration (HANYA Dompet Murni Independen!)
         individual_holders = {
             w: p for w, p in holders.items()
-            if w not in t.pool_vaults and w not in KNOWN_DEX_PROGRAMS
+            if w in unlinked_holders and w not in t.pool_vaults and w not in KNOWN_DEX_PROGRAMS
         }
 
         # Cek on-chain jika akun top 1 masih memegang > 20% pada koin DEX
@@ -1562,13 +1693,16 @@ class HitAndRunScanner:
         sorted_pcts = [p for _, p in sorted_individuals]
         top10_pct = sum(sorted_pcts[:10]) if sorted_pcts else 0.0
         top1_pct = sorted_pcts[0] if sorted_pcts else 0.0
-        t.dev_holding_pct = individual_holders.get(t.creator, 0.0) if t.creator else 0.0
+        t.dev_holding_pct = max(
+            individual_holders.get(t.creator, 0.0) if t.creator else 0.0,
+            dev_linked_pct
+        )
 
-        # Alpha Wallets (Menggunakan Dompet Pengguna Murni)
-        early_wallets = [b["wallet"] for b in self.buyers_buffer.get(mint, [])]
-        if not early_wallets and individual_holders:
-            early_wallets = list(individual_holders.keys())[:15]
-        t.alpha_wallet_count = await self.rpc.count_alpha_wallets(early_wallets)
+        # Alpha Wallets (Menggunakan Dompet Pengguna Independen Murni)
+        clean_early_wallets = [w for w in early_wallets if w in unlinked_holders or w in unlinked_buyers]
+        if not clean_early_wallets and individual_holders:
+            clean_early_wallets = list(individual_holders.keys())[:15]
+        t.alpha_wallet_count = await self.rpc.count_alpha_wallets(clean_early_wallets)
 
         # Velocity
         if len(t.sol_in_bonding_history) >= 2:
@@ -1579,11 +1713,28 @@ class HitAndRunScanner:
             t.liquidity_velocity = (pool_data["vol_m5"] / 160.0) / 5.0
 
         # ----------------------------------------------------
-        # 6. FILTER RED FLAGS (ANTI-JEBAKAN)
+        # 6. FILTER RED FLAGS (ANTI-JEBAKAN & ANTI-KOIN MATI)
         # ----------------------------------------------------
         red_flags: List[str] = []
 
-        # --- JEBAKAN CABAL & FAKE VOLUME (BARU) ---
+        # ====================================================
+        # SYARAT MUTLAK PEMEGANG & PEMBELI INDEPENDEN (TIDAK TERKAIT DEV)
+        # ====================================================
+        min_unlinked_h = self.cfg.min_unlinked_dex_holders_count if t.is_migrated else self.cfg.min_unlinked_holders_count
+        if t.unlinked_holders_count < min_unlinked_h:
+            red_flags.append(f"insufficient_unlinked_holders:{t.unlinked_holders_count}<{min_unlinked_h}")
+
+        if not t.is_migrated:
+            if t.unlinked_buyers_count < self.cfg.min_unlinked_buyers_count:
+                red_flags.append(f"insufficient_unlinked_buyers:{t.unlinked_buyers_count}<{self.cfg.min_unlinked_buyers_count}")
+            if t.volume_buys < self.cfg.min_volume_buys_sol:
+                red_flags.append(f"insufficient_buy_volume:{t.volume_buys:.1f}SOL<{self.cfg.min_volume_buys_sol}SOL")
+        else:
+            buys_m5 = pool_data.get("buys_m5", 0) if pool_data else 0
+            if buys_m5 < self.cfg.min_organic_buys_m5:
+                red_flags.append(f"dead_dex_buys_m5:{buys_m5}<{self.cfg.min_organic_buys_m5}")
+
+        # --- JEBAKAN CABAL, AFILIASI DEV, & FAKE VOLUME ---
         if is_cabal:
             red_flags.extend(cabal_flags)
         if is_wash:
