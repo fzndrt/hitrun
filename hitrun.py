@@ -24,6 +24,12 @@ from typing import Dict, List, Optional, Tuple, Set
 import threading
 from flask import Flask, jsonify
 
+# Pastikan seluruh log print langsung muncul seketika di Render (unbuffered)
+_builtin_print = print
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    _builtin_print(*args, **kwargs)
+
 
 # ============================================================
 # 1. KONFIGURASI ENGINE
