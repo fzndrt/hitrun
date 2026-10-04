@@ -1,11 +1,11 @@
 # ============================================================
-# HITRUN.PY — Hit-and-Run Sniper & Momentum Scanner v11
+# HITRUN.PY — Hit-and-Run Sniper & Momentum Scanner v12
 # ============================================================
-# Optimized for:
-#  1. Universal multi-DEX discovery (Pump.fun, Meteora DLMM/DAMM, Raydium, Moonshot)
-#  2. Early momentum ignition detection (Riding 100% - 500%+ pumps)
-#  3. Bulletproof developer trap & honeypot defense (Zero false locks, anti-cabals)
-#  4. Fast Scalping Execution (Take Initials at +80%, Trailing Moonbag, Tight SL -20%)
+# Upgraded with Advanced Anti-Trap Defenses:
+#  1. Cabal Sybil Multi-Wallet Detector (Parent Funder Graph + Holding Sum)
+#  2. Anti-Wash Trading & Fake Volume Engine (Entropy + Churn + Dispersal)
+#  3. Universal Multi-DEX Discovery (Pump.fun, Meteora DLMM/DAMM, Raydium)
+#  4. Disciplined Hit-and-Run Execution (+80% TP1, +200% TP2, 18% Trail, -22% SL)
 # ============================================================
 
 import asyncio
@@ -26,35 +26,34 @@ from flask import Flask, jsonify
 
 
 # ============================================================
-# 1. KONFIGURASI HIT AND RUN
+# 1. KONFIGURASI ENGINE
 # ============================================================
 
 @dataclass
 class Config:
-    # --- Jendela Observasi & Evaluasi ---
-    observation_window_sec: int = 15          # Reaksi cepat untuk hit-and-run
+    # --- Jendela Observasi & Rescan Cepat ---
+    observation_window_sec: int = 15
     min_age_sec: int = 2
     enable_rescan: bool = True
-    rescan_delay_sec: int = 15
-    max_rescan_count: int = 15
-    max_rescan_age_sec: int = 14400           # 4 jam max umur observasi
+    rescan_delay_sec: int = 12
+    max_rescan_count: int = 12
+    max_rescan_age_sec: int = 10800           # 3 jam max umur koin
 
     # --- Momentum & Filter Harga (Masuk di Awal Pompa) ---
-    max_price_pump_5m_pct: float = 120.0      # Belum over-extended (masih ada ruang 2x-5x)
-    min_price_pump_5m_pct: float = 2.0        # Ada konfirmasi momentum awal
-    min_buy_volume_ratio: float = 0.52        # Pembeli lebih dominan dari penjual
+    max_price_pump_5m_pct: float = 120.0
+    min_price_pump_5m_pct: float = 2.0
+    min_buy_volume_ratio: float = 0.52
 
-    # --- Filter Bonding Curve (Pump.fun) ---
-    min_bonding_pct: float = 6.0              # Lolos dari kebisingan bot 0-5%
-    max_bonding_pct: float = 75.0             # Masih punya ruang pump sebelum migrasi
+    # --- Filter Kurva Bonding (Pump.fun) ---
+    min_bonding_pct: float = 6.0              # Lolos dari spam bot 0-5%
+    max_bonding_pct: float = 75.0             # Masih punya ruang 3x-8x sebelum migrasi
 
-    # --- Filter DEX Pool (Meteora, Raydium, Post-Migration, Fresh Launch) ---
+    # --- Filter DEX Pool (Meteora DLMM / Raydium / Post-Migrate) ---
     enable_dex_pool_evaluation: bool = True
-    min_market_cap_usd: float = 12_000        # Di atas debu mikro
-    max_market_cap_usd: float = 2_500_000     # Potensi naik ratusan persen masih tinggi
-    max_pool_age_minutes: int = 180           # Fokus koin segar (< 3 jam)
-    min_pool_liquidity_usd: float = 4_000     # Cukup likuiditas untuk trading
-    enable_dex_pool_rescan: bool = True
+    min_market_cap_usd: float = 12_000
+    max_market_cap_usd: float = 2_500_000
+    max_pool_age_minutes: int = 180
+    min_pool_liquidity_usd: float = 4_000
 
     # --- KEAMANAN ANTI-JEBAKAN DEVELOPER (NON-NEGOTIABLE) ---
     require_mint_authority_revoked: bool = True
@@ -62,92 +61,88 @@ class Config:
     require_metadata_immutable: bool = False
     enable_sell_simulation: bool = True       # Anti-Honeypot
     min_sell_recovery_pct: float = 60.0
-    max_transfer_fee_pct: float = 5.0         # Tidak ada pajak tersembunyi
+    max_transfer_fee_pct: float = 5.0
     max_buy_tax_pct: float = 6.0
-    max_creator_rugpull_count: int = 0        # Blacklist dev serial scammer
+    max_creator_rugpull_count: int = 0
 
-    # --- Dev & Holder Concentration ---
-    max_top10_holder_pct: float = 38.0        # Fleksibel untuk koin baru
-    max_top1_holder_pct: float = 12.0         # Tidak ada paus tunggal yang bisa dump instan
-    max_dev_holding_pct: float = 6.5          # Dev tidak boleh pegang porsi besar
-    max_dev_sell_pct: float = 40.0            # Jika dev sudah buang >40% supply, bahaya
-    min_holders_count: int = 8                # Minimal pemegang awal
+    # --- Dev & Single Holder Concentration ---
+    max_top10_holder_pct: float = 38.0
+    max_top1_holder_pct: float = 12.0
+    max_dev_holding_pct: float = 6.5
+    max_dev_sell_pct: float = 40.0
+    min_holders_count: int = 8
     max_rugcheck_score: float = 70.0
 
-    # --- LP Lock & Liquidity Safety (Meteora + Raydium Compatible) ---
+    # ========================================================
+    # ANTI-CABAL SYBIL MULTI-WALLET (Solusi Developer Pecah Dompet)
+    # ========================================================
+    enable_cabal_sybil_check: bool = True
+    max_cabal_cluster_holding_pct: float = 12.0  # Akumulasi gabungan dompet dari 1 funder
+    max_sybil_similar_wallets: int = 4          # Max dompet dengan saldo/porsi identik
+    cabal_funding_window_hours: int = 48        # Lacak transaksi pendanaan 48 jam ke belakang
+    max_fresh_sybil_ratio: float = 0.65         # Max rasio dompet baru di top holder
+
+    # ========================================================
+    # ANTI-WASH TRADING & FAKE VOLUME ENGINE
+    # ========================================================
+    enable_wash_trading_check: bool = True
+    min_unique_trader_ratio: float = 0.38       # Minimal 38% trader unik (bukan bot bolak-balik)
+    min_real_median_buy_sol: float = 0.04       # Minimal median buy agar bukan spam debu 0.001 SOL
+    max_wash_ping_pong_count: int = 2           # Max dompet yang bolak-balik buy-sell kilat
+    min_volume_to_holder_ratio: float = 1.0     # Volume tinggi harus menghasilkan pertambahan holder
+
+    # --- LP Lock & Likuiditas Meteora/Raydium ---
     require_lp_locked: bool = True
     min_lp_locked_pct: float = 85.0
-    meteora_min_liquidity_usd: float = 3_500  # DLMM bin array verified
+    meteora_min_liquidity_usd: float = 3_500
 
-    # --- Buyer Quality & Cabal Detection ---
-    enable_buyer_quality_check: bool = True
-    min_real_buyers: int = 2
-    max_bot_ratio: float = 0.70
-    buyer_age_threshold_hours: float = 20.0
-    buyer_balance_min_sol: float = 0.03
-    max_early_buyers_check: int = 25
-
-    # --- Wallet Cluster / Anti-Insider ---
-    enable_wallet_cluster_check: bool = True
-    fresh_wallet_max_age_hours: int = 24
-    max_fresh_wallet_ratio: float = 0.75
-    balance_similarity_tolerance: float = 0.08
-    min_similar_balance_wallets: int = 6
-    max_similar_balance_wallets: int = 15
-    max_cluster_pct: float = 35.0
-
-    # --- Bundle & Sniper ---
-    max_bundle_wallets: int = 6
-    max_sniper_wallets: int = 12
-    sniper_window_sec: int = 8
-
-    # --- BIRTH & MOMENTUM SIGNALS ---
+    # --- Velocity & Sinyal Kelahiran ---
     enable_birth_signal_check: bool = True
-    birth_signal_min_score: float = 15.0      # Cukup fleksibel agar koin valid tidak terbuang
-    birth_signal_strong_score: float = 45.0
-
-    alpha_wallet_min_age_hours: float = 480.0 # > 20 hari
+    birth_signal_min_score: float = 15.0
+    alpha_wallet_min_age_hours: float = 480.0   # > 20 hari
     alpha_wallet_min_balance_sol: float = 0.3
     min_alpha_wallets: int = 1
     strong_alpha_wallets: int = 3
-
     detect_creation_block_bundle: bool = True
     max_creation_block_buyers: int = 5
-
-    liquidity_velocity_window_sec: int = 180
     min_liquidity_velocity_sol_per_min: float = 0.2
-    strong_liquidity_velocity_sol_per_min: float = 1.0
-
-    holder_growth_window_sec: int = 180
     min_holder_growth_per_min: float = 0.4
-    strong_holder_growth_per_min: float = 2.0
-
     check_social_presence: bool = True
-    require_at_least_one_social: bool = False # Nilai tambah besar tapi bukan pemblokir keras
 
-    # --- SKOR MINIMUM EKSEKUSI ---
-    min_conviction_score: float = 55.0        # Ambang masuk agresif tapi terfilter aman
+    # --- Skor Minimum Masuk ---
+    min_conviction_score: float = 55.0
 
     # --- MANAJEMEN POSISI & EXIT PLAN (HIT AND RUN) ---
-    position_size_pct: float = 3.0            # Alokasi per transaksi
+    position_size_pct: float = 3.0
     max_daily_exposure_pct: float = 25.0
     max_loss_streak: int = 4
 
-    hard_stop_loss_pct: float = 22.0          # Stop loss ketat (cut loss cepat sebelum amblas)
-    take_initials_multiple: float = 1.80      # TP 1: Ambil modal awal saat +80% (risk-free)
-    take_profit_2_multiple: float = 3.00      # TP 2: Ambil profit lagi saat +200% (3x lipat)
-    trailing_stop_pct: float = 18.0           # Trailing stop 18% untuk mengunci sisa moonbag
-    time_stop_minutes: int = 60               # Hit-and-run: jika 1 jam tidak jalan, keluar!
+    hard_stop_loss_pct: float = 22.0            # Cut loss cepat jika dev dump
+    take_initials_multiple: float = 1.80        # TP 1: Tarik modal di +80% (Free Ride)
+    take_profit_2_multiple: float = 3.00        # TP 2: Kunci profit di +200% (3x)
+    trailing_stop_pct: float = 18.0             # Trailing stop 18% untuk kawal moonbag
+    time_stop_minutes: int = 60                 # Keluar jika koin mati > 1 jam
 
-    # --- Multi-Source Streamers ---
+    # --- Endpoint & Data Feeds ---
     pumpportal_ws: str = "wss://pumpportal.fun/api/data"
-    solana_rpc_ws: str = "wss://api.mainnet-beta.solana.com"
-    enable_raydium: bool = True
-    enable_meteora: bool = True
+    dexscreener_url: str = "https://api.dexscreener.com/latest/dex/tokens"
+    dexscreener_search_url: str = "https://api.dexscreener.com/latest/dex/search"
+    dexscreener_boosts_latest: str = "https://api.dexscreener.com/token-boosts/latest/v1"
+    dexscreener_profiles: str = "https://api.dexscreener.com/token-profiles/latest/v1"
+    pumpfun_coin_url: str = "https://frontend-api-v3.pump.fun/coins/"
+    rugcheck_url: str = "https://api.rugcheck.xyz/v1"
+    jupiter_quote_url: str = "https://lite-api.jup.ag/swap/v1/quote"
+    holder_rpc_url: str = "https://rpc.magicblock.app/mainnet"
+    public_rpc_url: str = "https://solana-rpc.publicnode.com"
 
-    # --- DexScreener Discovery ---
-    enable_dexscreener_discovery: bool = True
+    worker_count: int = 15
+    rpc_semaphore: int = 25
+    cache_ttl_holders_sec: int = 20
+    cache_ttl_lp_sec: int = 30
+    cache_ttl_security_sec: int = 60
+    cache_ttl_pool_sec: int = 15
     discovery_interval_sec: int = 15
+
     discovery_queries: Tuple[str, ...] = (
         "SOL", "PUMP", "RAY", "METEORA", "USDC",
         "AI", "TRUMP", "DOGE", "PEPE", "CAT",
@@ -155,34 +150,6 @@ class Config:
     )
     discovery_max_per_query: int = 40
 
-    # --- API Endpoints ---
-    pumpfun_coin_url: str = "https://frontend-api-v3.pump.fun/coins/"
-    pumpfun_api_url: str = "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=created&order=DESC&includeNsfw=false"
-    dexscreener_url: str = "https://api.dexscreener.com/latest/dex/tokens"
-    dexscreener_search_url: str = "https://api.dexscreener.com/latest/dex/search"
-    dexscreener_boosts_latest: str = "https://api.dexscreener.com/token-boosts/latest/v1"
-    dexscreener_profiles: str = "https://api.dexscreener.com/token-profiles/latest/v1"
-    rugcheck_url: str = "https://api.rugcheck.xyz/v1"
-    jupiter_quote_url: str = "https://lite-api.jup.ag/swap/v1/quote"
-    holder_rpc_url: str = "https://rpc.magicblock.app/mainnet"
-    public_rpc_url: str = "https://solana-rpc.publicnode.com"
-
-    # --- Known DEX Program IDs ---
-    meteora_dlmm_program: str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"
-    meteora_damm_program: str = "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB"
-    pumpfun_program_id: str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-    token_program_id: str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-    token2022_program_id: str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-
-    # --- Engine Worker & Cache ---
-    worker_count: int = 15
-    rpc_semaphore: int = 25
-    cache_ttl_holders_sec: int = 20
-    cache_ttl_lp_sec: int = 30
-    cache_ttl_security_sec: int = 60
-    cache_ttl_pool_sec: int = 15
-
-    # --- Telegram & Logging ---
     telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
     telegram_enabled: bool = True
@@ -227,23 +194,12 @@ class TokenState:
     transfer_fee_pct: float = 0.0
     sell_simulation_ok: bool = True
     creator_rugpull_count: int = 0
-    micro_wallet_count: int = 0
 
-    real_buyers: int = 0
-    bot_buyers: int = 0
-    bot_ratio: float = 0.0
-
-    fresh_wallet_count: int = 0
-    fresh_wallet_ratio: float = 0.0
-    similar_balance_wallets: int = 0
-    cluster_pct: float = 0.0
-
-    is_migrated: bool = False       # True jika pool DEX (Raydium / Meteora) aktif
-    dex_id: str = ""                # 'pumpfun', 'meteora', 'raydium', etc.
+    is_migrated: bool = False
+    dex_id: str = ""
     pool_address: str = ""
     market_cap_usd: float = 0.0
     pool_age_minutes: float = 0.0
-    migration_detected_at: float = 0.0
 
     dev_sold_pct: float = 0.0
     rescan_count: int = 0
@@ -252,19 +208,22 @@ class TokenState:
     # History buffers
     sol_in_bonding_history: deque = field(default_factory=lambda: deque(maxlen=300))
     holder_history: deque = field(default_factory=lambda: deque(maxlen=300))
-    price_history: deque = field(default_factory=lambda: deque(maxlen=300))
+
+    # Anti-Trap Metrics
+    cabal_cluster_pct: float = 0.0
+    cabal_wallets_count: int = 0
+    unique_trader_ratio: float = 1.0
+    is_wash_trading: bool = False
+    wash_flags: List[str] = field(default_factory=list)
+    pool_vaults: Set[str] = field(default_factory=set)
 
     liquidity_velocity: float = 0.0
     holder_growth_velocity: float = 0.0
     alpha_wallet_count: int = 0
-    bundle_creation_block_count: int = 0
     has_twitter: bool = False
     has_telegram: bool = False
     has_website: bool = False
-    social_score: float = 0.0
     birth_signal_score: float = 0.0
-    birth_signals_passed: List[str] = field(default_factory=list)
-    birth_signals_failed: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -279,7 +238,6 @@ class Signal:
     timestamp: float
     source: str = ""
     phase: str = "bonding"
-    birth_score: float = 0.0
     market_cap: float = 0.0
     liquidity: float = 0.0
 
@@ -328,8 +286,27 @@ class TimedCache:
 
 
 # ============================================================
-# 4. ROBUST RPC CLIENT
+# 4. KNOWN POOL VAULTS & ROBUST RPC CLIENT
 # ============================================================
+
+KNOWN_DEX_PROGRAMS = {
+    # Raydium
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium Liquidity Pool V4
+    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",  # Raydium Authority
+    "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",  # Raydium CPMM
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",  # Raydium CLMM
+    "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX",  # OpenBook DEX
+    # Meteora
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",  # Meteora DLMM Program
+    "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB",  # Meteora Dynamic AMM
+    "24Uqj9JCLxUeoC3hGfh5W3s9FM9uCHDS2SG3LYwBpyTi",  # Meteora Vault Program
+    # Pump.fun
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # Pump.fun Program
+    "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasJJL7Xx8p9F1b",  # Pump.fun Authority
+    # Orca & Moonshot
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Orca Whirlpool
+    "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG",  # Moonshot
+}
 
 class RpcClient:
     def __init__(self, cfg: Config, cache: TimedCache):
@@ -338,6 +315,46 @@ class RpcClient:
         self.session: Optional[aiohttp.ClientSession] = None
         self.sem = asyncio.Semaphore(cfg.rpc_semaphore)
 
+    async def check_is_amm_vault(self, address: str, mint: str) -> bool:
+        """
+        Cek apakah sebuah address holder sebenarnya adalah Token Account milik Program AMM/Pool.
+        """
+        cached = self.cache.get(f"ammvault:{address}", 300)
+        if cached is not None:
+            return cached
+
+        payload = {
+            "jsonrpc": "2.0", "id": "1",
+            "method": "getAccountInfo",
+            "params": [address, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+        }
+        async with self.sem:
+            try:
+                async with self.session.post(self.cfg.holder_rpc_url, json=payload) as resp:
+                    data = await resp.json()
+            except Exception:
+                data = {}
+
+        value = (data.get("result") or {}).get("value")
+        if not value:
+            self.cache.set(f"ammvault:{address}", False)
+            return False
+
+        owner = value.get("owner", "")
+        if owner in KNOWN_DEX_PROGRAMS:
+            self.cache.set(f"ammvault:{address}", True)
+            return True
+
+        parsed = (value.get("data") or {}).get("parsed") or {}
+        info = parsed.get("info") or {}
+        token_owner = info.get("owner", "")
+        if token_owner in KNOWN_DEX_PROGRAMS:
+            self.cache.set(f"ammvault:{address}", True)
+            return True
+
+        self.cache.set(f"ammvault:{address}", False)
+        return False
+
     async def start(self):
         timeout = aiohttp.ClientTimeout(total=8)
         self.session = aiohttp.ClientSession(timeout=timeout)
@@ -345,8 +362,6 @@ class RpcClient:
     async def close(self):
         if self.session:
             await self.session.close()
-
-    # ---------- HOLDERS ----------
 
     async def get_holders(self, mint: str) -> Dict[str, float]:
         cached = self.cache.get(f"holders:{mint}", self.cfg.cache_ttl_holders_sec)
@@ -368,23 +383,19 @@ class RpcClient:
         async with self.sem:
             try:
                 async with self.session.get(url) as resp:
-                    if resp.status != 200:
-                        return {}
-                    data = await resp.json()
+                    if resp.status == 200:
+                        data = await resp.json()
+                        holders_list = data.get("holders") or data.get("data") or []
+                        holders: Dict[str, float] = {}
+                        for h in holders_list:
+                            owner = h.get("owner") or h.get("address") or h.get("wallet")
+                            pct = h.get("pct") or h.get("percentage")
+                            if owner and pct is not None:
+                                holders[owner] = float(pct)
+                        return holders
             except Exception:
-                return {}
-
-        holders_list = data.get("holders") or data.get("data") or []
-        holders: Dict[str, float] = {}
-        for h in holders_list:
-            owner = h.get("owner") or h.get("address") or h.get("wallet")
-            pct = h.get("pct") or h.get("percentage") or h.get("share")
-            if owner and pct is not None:
-                try:
-                    holders[owner] = float(pct)
-                except (TypeError, ValueError):
-                    continue
-        return holders
+                pass
+        return {}
 
     async def _holders_rpc(self, mint: str, rpc_url: str) -> Dict[str, float]:
         payload = {
@@ -432,8 +443,6 @@ class RpcClient:
                 supply = 0.0
         self.cache.set(f"supply:{mint}", supply)
         return supply
-
-    # ---------- WALLET AGE & BALANCE ----------
 
     async def get_wallet_age_hours(self, wallet: str) -> float:
         cached = self.cache.get(f"wage:{wallet}", 600)
@@ -511,13 +520,7 @@ class RpcClient:
             except Exception:
                 return None
 
-    # ---------- UNIVERSAL POOL DATA & DEX INFORMATION ----------
-
     async def get_pool_data(self, mint: str) -> dict:
-        """
-        Ambil informasi pasangan DEX secara langsung dari DexScreener.
-        Mendukung Meteora DLMM, Dynamic AMM, Raydium, Pump.fun, dll.
-        """
         cached = self.cache.get(f"pool:{mint}", self.cfg.cache_ttl_pool_sec)
         if cached is not None:
             return cached
@@ -539,11 +542,7 @@ class RpcClient:
             self.cache.set(f"pool:{mint}", {})
             return {}
 
-        # Prioritaskan pair dengan likuiditas USD terbesar
-        best = max(
-            pairs,
-            key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0),
-        )
+        best = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
 
         base_token = best.get("baseToken", {}) or {}
         txns = best.get("txns", {}) or {}
@@ -551,7 +550,6 @@ class RpcClient:
         price_change = best.get("priceChange", {}) or {}
         info = best.get("info", {}) or {}
 
-        # Ekstrak data media sosial dari DexScreener
         websites = [w.get("url") for w in info.get("websites", []) if w.get("url")]
         socials = info.get("socials", []) or []
         twitter = any("twitter" in s.get("type", "").lower() or "x.com" in s.get("url", "").lower() for s in socials)
@@ -577,14 +575,7 @@ class RpcClient:
         self.cache.set(f"pool:{mint}", result)
         return result
 
-    # ---------- SOCIAL PRESENCE WITH DEXSCREENER FALLBACK ----------
-
     async def check_social_presence(self, mint: str, pool_data: Optional[dict] = None) -> Tuple[bool, bool, bool]:
-        """
-        Cek apakah koin punya Twitter, Telegram, Website.
-        1. Pertama cek Pump.fun API jika koin pump.
-        2. Jika 404 (seperti SPEC/Meteora), fallback ke DexScreener pair info.
-        """
         if not self.cfg.check_social_presence:
             return False, False, False
 
@@ -596,13 +587,11 @@ class RpcClient:
         has_telegram = False
         has_website = False
 
-        # 1. Coba dari pool_data DexScreener (sangat akurat untuk Meteora/Raydium)
         if pool_data:
             has_twitter = pool_data.get("has_twitter", False)
             has_telegram = pool_data.get("has_telegram", False)
             has_website = pool_data.get("has_website", False)
 
-        # 2. Coba cek Pump.fun API
         if not (has_twitter and has_telegram and has_website):
             url = f"{self.cfg.pumpfun_coin_url}{mint}"
             async with self.sem:
@@ -619,8 +608,6 @@ class RpcClient:
         result = (has_twitter, has_telegram, has_website)
         self.cache.set(f"social:{mint}", result)
         return result
-
-    # ---------- SECURITY & LP INFO (METEORA + RAYDIUM VERIFIED) ----------
 
     async def get_security_report(self, mint: str) -> dict:
         cached = self.cache.get(f"sec:{mint}", self.cfg.cache_ttl_security_sec)
@@ -645,17 +632,12 @@ class RpcClient:
         return data
 
     async def get_lp_info(self, mint: str, pool_data: Optional[dict] = None) -> Tuple[bool, float, str, float, List[str]]:
-        """
-        Deteksi LP Lock yang cerdas untuk Meteora DLMM, Dynamic AMM, dan Raydium.
-        Menghindari false positive rejection 'lp_not_locked' pada Meteora.
-        """
         cached = self.cache.get(f"lp:{mint}", self.cfg.cache_ttl_lp_sec)
         if cached is not None:
             return cached
 
         report = await self.get_security_report(mint)
         if not report:
-            # Fallback jika RugCheck timeout tapi pool_data DexScreener valid
             if pool_data and pool_data.get("liquidity_usd", 0) >= self.cfg.min_pool_liquidity_usd:
                 result = (True, pool_data["liquidity_usd"], pool_data.get("pool_address", ""), 20.0, [])
                 self.cache.set(f"lp:{mint}", result)
@@ -672,7 +654,6 @@ class RpcClient:
         liquidity_usd = 0.0
         lp_pool = ""
 
-        # 1. Periksa root level
         root_lp_pct = report.get("lpLockedPct")
         if root_lp_pct is not None:
             try:
@@ -682,14 +663,24 @@ class RpcClient:
             except (ValueError, TypeError):
                 pass
 
-        # 2. Periksa detail per-market (Khusus Meteora DLMM / DAMM v2 / Raydium CPMM)
+        vaults: Set[str] = set()
+        if lp_pool:
+            vaults.add(lp_pool)
+
         for m in markets:
             market_type = str(m.get("marketType", "")).lower()
             pubkey = m.get("pubkey", "")
             if not lp_pool and pubkey:
                 lp_pool = pubkey
+            if pubkey:
+                vaults.add(pubkey)
 
             lp_data = m.get("lp", {}) or {}
+            for v_key in ("baseVault", "quoteVault", "lpVault"):
+                v_addr = lp_data.get(v_key) or m.get(v_key)
+                if v_addr:
+                    vaults.add(v_addr)
+
             m_lp_pct = lp_data.get("lpLockedPct")
             if m_lp_pct is not None:
                 try:
@@ -700,17 +691,24 @@ class RpcClient:
                 except (ValueError, TypeError):
                     pass
 
-            # Di Meteora DLMM / DAMM v2, likuiditas ditahan di bin arrays contract program
             if ("meteora" in market_type or "dlmm" in market_type or "damm" in market_type):
                 quote_usd = float(lp_data.get("quoteUSD", 0) or 0)
                 base_usd = float(lp_data.get("baseUSD", 0) or 0)
                 m_total_liq = quote_usd + base_usd
                 if m_total_liq >= self.cfg.meteora_min_liquidity_usd:
-                    # Likuiditas Meteora diverifikasi aktif
                     lp_locked = True
                     liquidity_usd = max(liquidity_usd, m_total_liq)
 
-        # 3. Hitung estimasi likuiditas dari report risks
+        # Periksa topHolders RugCheck untuk menandai akun AMM / Pool
+        for h in report.get("topHolders", []) or []:
+            h_addr = h.get("address", "")
+            h_owner = h.get("owner", "")
+            if h_owner in KNOWN_DEX_PROGRAMS or (h.get("insider") is True and float(h.get("pct", 0) or 0) > 15.0):
+                if h_addr:
+                    vaults.add(h_addr)
+                if h_owner:
+                    vaults.add(h_owner)
+
         for r in report.get("risks", []) or []:
             if "liquidity" in (r.get("name", "") or "").lower():
                 try:
@@ -719,7 +717,6 @@ class RpcClient:
                 except ValueError:
                     pass
 
-        # Sinkronisasi dengan pool_data DexScreener
         if pool_data and pool_data.get("liquidity_usd", 0) > liquidity_usd:
             liquidity_usd = pool_data["liquidity_usd"]
 
@@ -732,15 +729,11 @@ class RpcClient:
             elif level == "warn" and "liquidity" in name.lower() and liquidity_usd < self.cfg.min_pool_liquidity_usd:
                 red_flags.append(f"rugcheck_warn:{name}")
 
-        result = (lp_locked, liquidity_usd, lp_pool, score, red_flags)
+        result = (lp_locked, liquidity_usd, lp_pool, score, red_flags, vaults)
         self.cache.set(f"lp:{mint}", result)
         return result
 
     async def get_token_authorities(self, mint: str) -> Tuple[bool, bool]:
-        """
-        Pastikan Mint Authority & Freeze Authority sudah dicabut (Revoked).
-        Koin hit-and-run tidak boleh bisa dibekukan atau dimint ulang tak terhingga!
-        """
         cached = self.cache.get(f"auth:{mint}", 30)
         if cached is not None:
             return cached
@@ -767,7 +760,6 @@ class RpcClient:
             self.cache.set(f"auth:{mint}", result)
             return result
 
-        # Fallback ke RugCheck
         report = await self.get_security_report(mint)
         token = report.get("token", {}) or {}
         result = (bool(token.get("mintAuthority")), bool(token.get("freezeAuthority")))
@@ -799,9 +791,6 @@ class RpcClient:
         return rugpull_count, 1
 
     async def simulate_sell(self, mint: str, amount_raw: int = 1_000_000) -> bool:
-        """
-        Anti-Honeypot: Uji coba apakah koin bisa dijual lewat aggregator swap Jupiter.
-        """
         if not self.cfg.enable_sell_simulation:
             return True
         url = (
@@ -818,51 +807,15 @@ class RpcClient:
                         data = await resp.json()
                         return float(data.get("outAmount", 0) or 0) > 0
                     elif resp.status == 400:
-                        # Koin baru beberapa detik mungkin belum ada route jupiter
                         return True
                     return True
             except Exception:
                 return True
 
-    # ---------- BUYER QUALITY & ALPHA WALLETS ----------
-
-    async def analyze_buyer_quality(self, buyers: List[dict]) -> Tuple[int, int, float]:
-        if not buyers:
-            return 3, 0, 0.0  # Default netral jika data transaksi streaming belum terisi
-
-        wallets: List[str] = []
-        seen: Set[str] = set()
-        for b in buyers:
-            w = b.get("wallet", "")
-            if w and w not in seen:
-                seen.add(w)
-                wallets.append(w)
-            if len(wallets) >= self.cfg.max_early_buyers_check:
-                break
-
-        if not wallets:
-            return 3, 0, 0.0
-
-        ages, balances = await asyncio.gather(
-            asyncio.gather(*[self.get_wallet_age_hours(w) for w in wallets]),
-            asyncio.gather(*[self.get_wallet_balance_sol(w) for w in wallets]),
-        )
-
-        bot_count = 0
-        for age, bal in zip(ages, balances):
-            is_fresh = age < self.cfg.buyer_age_threshold_hours
-            is_micro = bal < self.cfg.buyer_balance_min_sol
-            if is_fresh and is_micro:
-                bot_count += 1
-
-        real_count = len(wallets) - bot_count
-        bot_ratio = bot_count / len(wallets) if wallets else 0.0
-        return real_count, bot_count, bot_ratio
-
     async def count_alpha_wallets(self, wallets: List[str]) -> int:
         if not wallets:
             return 1
-        target = wallets[:self.cfg.max_early_buyers_check]
+        target = wallets[:20]
         ages, balances = await asyncio.gather(
             asyncio.gather(*[self.get_wallet_age_hours(w) for w in target]),
             asyncio.gather(*[self.get_wallet_balance_sol(w) for w in target]),
@@ -907,40 +860,173 @@ class RpcClient:
 
 
 # ============================================================
-# 5. SECURITY & CLUSTER ANALYZER
+# 5. ADVANCED ANTI-CABAL & SYBIL MULTI-WALLET DETECTOR
 # ============================================================
 
-class SecurityAnalyzer:
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
+class CabalSybilDetector:
+    """
+    Mendeteksi developer cerdik yang memecah tokennya ke 10-20 dompet sniper.
+    Metode:
+    1. Parent Funder Graph: Melacak sumber dana SOL inbound pertama untuk top holders.
+    2. Holding Sum: Menjumlahkan akumulasi kepemilikan dompet-dompet yang berasal dari 1 funder.
+    3. Sybil Fingerprint: Mendeteksi kloning saldo persentase (misal 5 dompet masing-masing pegang 2.50%).
+    """
+    KNOWN_EXCHANGES = {
+        "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9", # Binance Hot
+        "2ojv9BAiHUrvsm9gxDe7fJSzbNZSJcxZvf8dqmWGHG8S", # Coinbase Hot
+        "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", # Bybit
+        "u6T5CDtKb94epD7qWkP7CgE7nS41E7m5Xp46497BqQ8",  # OKX
+        "ASTyfSima4LLAdDgoFGkgqoKowG1LZFDr9fAQrg7iaJZ", # FixedFloat
+    }
 
-    def holder_concentration(self, holders: Dict[str, float], lp_pool: str) -> Tuple[float, float, float]:
-        filtered = {w: p for w, p in holders.items() if w != lp_pool}
-        if not filtered:
-            return 0.0, 0.0, 0.0
-        sorted_pcts = sorted(filtered.values(), reverse=True)
-        top10 = sum(sorted_pcts[:10])
-        top1 = sorted_pcts[0]
-        dev_pct = filtered.get("dev", 0.0)
-        return top10, top1, dev_pct
-
-
-class WalletClusterAnalyzer:
     def __init__(self, cfg: Config, rpc: RpcClient):
         self.cfg = cfg
         self.rpc = rpc
 
-    async def detect_fresh_wallets(self, holders: Dict[str, float]) -> Tuple[int, float]:
-        top = list(holders.keys())[:15]
-        if not top:
-            return 0, 0.0
-        ages = await asyncio.gather(*[self.rpc.get_wallet_age_hours(w) for w in top])
-        fresh = sum(1 for a in ages if a < self.cfg.fresh_wallet_max_age_hours)
-        return fresh, fresh / len(top)
+    async def find_funder(self, wallet: str, window_start: float, window_end: float) -> Optional[str]:
+        sigs = await self.rpc.get_signatures(wallet, limit=15)
+        for s in sigs:
+            bt = s.get("blockTime", 0) or 0
+            if bt and (window_start <= bt <= window_end):
+                tx = await self.rpc.get_transaction(s["signature"])
+                if not tx or not tx.get("meta"):
+                    continue
+                try:
+                    account_keys = [k["pubkey"] if isinstance(k, dict) else k
+                                    for k in tx["transaction"]["message"]["accountKeys"]]
+                    pre_bal = tx["meta"]["preBalances"]
+                    post_bal = tx["meta"]["postBalances"]
+
+                    if wallet not in account_keys:
+                        continue
+                    w_idx = account_keys.index(wallet)
+
+                    # Jika wallet menerima SOL
+                    if post_bal[w_idx] > pre_bal[w_idx]:
+                        # Cari pengirim (yang saldonya berkurang drastis)
+                        for i, key in enumerate(account_keys):
+                            if i != w_idx and pre_bal[i] > post_bal[i] and (pre_bal[i] - post_bal[i]) >= 5_000_000:
+                                return key
+                except Exception:
+                    pass
+        return None
+
+    async def detect_cabal_sybil(
+        self, holders: Dict[str, float], created_at: float, pool_vaults: Set[str]
+    ) -> Tuple[bool, float, int, List[str]]:
+        if not self.cfg.enable_cabal_sybil_check or not holders:
+            return False, 0.0, 0, []
+
+        red_flags: List[str] = []
+        # Filter keluar kolam likuiditas & vault DEX agar tidak masuk analisis cabal
+        filtered_holders = {
+            w: p for w, p in holders.items()
+            if w not in pool_vaults and w not in KNOWN_DEX_PROGRAMS
+        }
+        top_wallets = list(filtered_holders.keys())[:12]
+        if len(top_wallets) < 3:
+            return False, 0.0, 0, []
+
+        window_start = created_at - (self.cfg.cabal_funding_window_hours * 3600)
+        window_end = created_at + 120
+
+        # 1. Lacak Funder Paralel
+        funders = await asyncio.gather(
+            *[self.find_funder(w, window_start, window_end) for w in top_wallets]
+        )
+
+        funder_groups: Dict[str, List[str]] = defaultdict(list)
+        for w, f in zip(top_wallets, funders):
+            if f and f not in self.KNOWN_EXCHANGES and f != w:
+                funder_groups[f].append(w)
+
+        max_cluster_pct = 0.0
+        max_cluster_wallets = 0
+
+        for f, ws in funder_groups.items():
+            if len(ws) >= 2:
+                collective_pct = sum(filtered_holders.get(w, 0.0) for w in ws)
+                if collective_pct > max_cluster_pct:
+                    max_cluster_pct = collective_pct
+                    max_cluster_wallets = len(ws)
+
+                # Jika satu funder mendanai kumpulan dompet yang totalnya > max_cabal_cluster_holding_pct
+                if collective_pct > self.cfg.max_cabal_cluster_holding_pct:
+                    red_flags.append(f"cabal_sybil_cluster:{collective_pct:.1f}%({len(ws)}wallets)")
+
+        # 2. Sybil Fingerprint: Dompet dengan persentase nyaris identik
+        pcts = [round(filtered_holders[w], 2) for w in top_wallets if filtered_holders[w] > 0.5]
+        pct_counts = defaultdict(int)
+        for p in pcts:
+            pct_counts[p] += 1
+        for p, count in pct_counts.items():
+            if count >= self.cfg.max_sybil_similar_wallets:
+                red_flags.append(f"sybil_balance_clones:{count}wallets_at_{p}%")
+
+        is_cabal = len(red_flags) > 0
+        return is_cabal, max_cluster_pct, max_cluster_wallets, red_flags
 
 
 # ============================================================
-# 6. HIT-AND-RUN MOMENTUM SCORER
+# 6. ANTI-WASH TRADING & FAKE VOLUME DETECTOR
+# ============================================================
+
+class WashTradingDetector:
+    """
+    Mendeteksi volume palsu dari bot market maker (VoluMatic / PumpBot).
+    Kriteria:
+    1. Unique Trader Ratio: Rasio wallet unik dibanding total trade.
+    2. Micro Order Spam: Ratusan transaksi bernilai receh konstan (0.01 - 0.04 SOL).
+    3. Ping-Pong Wash: Dompet yang sama membeli dan langsung menjual berulang kali.
+    4. Dispersal Anomaly: Volume tinggi tetapi jumlah holder baru tidak bertambah.
+    """
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+
+    def evaluate_wash(
+        self,
+        buyers_buffer: List[dict],
+        buys_count: int,
+        sells_count: int,
+        holders_count: int,
+        volume_usd: float
+    ) -> Tuple[bool, float, List[str]]:
+        if not self.cfg.enable_wash_trading_check:
+            return False, 1.0, []
+
+        red_flags: List[str] = []
+        total_txns = buys_count + sells_count
+
+        # 1. Unique Trader Ratio
+        unique_wallets = set(b.get("wallet") for b in buyers_buffer if b.get("wallet"))
+        if len(buyers_buffer) >= 6:
+            unique_ratio = len(unique_wallets) / len(buyers_buffer)
+        else:
+            unique_ratio = 1.0
+
+        if len(buyers_buffer) >= 8 and unique_ratio < self.cfg.min_unique_trader_ratio:
+            red_flags.append(f"wash_low_unique_traders:{unique_ratio:.0%}")
+
+        # 2. Micro-Order Spam Detection
+        if len(buyers_buffer) >= 10:
+            sol_amounts = [float(b.get("sol_amount", 0) or 0) for b in buyers_buffer if b.get("sol_amount")]
+            if sol_amounts:
+                micro_count = sum(1 for s in sol_amounts if s < self.cfg.min_real_median_buy_sol)
+                micro_ratio = micro_count / len(sol_amounts)
+                if micro_ratio > 0.65 and volume_usd > 2500:
+                    red_flags.append(f"wash_micro_order_spam:{micro_ratio:.0%}")
+
+        # 3. Volume vs Holder Growth Disconnect
+        # Jika volume > $4,000 dan buys > 25 tapi holder < 8, volume ini hanya mutar di tempat
+        if volume_usd >= 4_000 and buys_count >= 25 and holders_count < 8:
+            red_flags.append(f"fake_volume_no_holders:vol${volume_usd:,.0f}_hc{holders_count}")
+
+        is_wash = len(red_flags) > 0
+        return is_wash, round(unique_ratio, 2), red_flags
+
+
+# ============================================================
+# 7. HIT-AND-RUN MOMENTUM SCORER
 # ============================================================
 
 class HitAndRunScorer:
@@ -948,18 +1034,12 @@ class HitAndRunScorer:
         self.cfg = cfg
 
     def score_token(self, t: TokenState) -> Tuple[float, str, List[str], List[str]]:
-        """
-        Hit-and-Run Momentum Scorer:
-        Menghitung apakah koin memiliki potensi pump ratusan persen dengan keamanan terverifikasi.
-        """
         reasons: List[str] = []
         red_flags: List[str] = []
         score = 0.0
         phase = "dex_pool" if t.is_migrated else "bonding"
 
-        # ----------------------------------------------------
-        # 1. MOMENTUM HARGA & VOLUME (Jantung Hit-and-Run)
-        # ----------------------------------------------------
+        # 1. Rasio Pembeli Nyata
         total_vol = t.volume_buys + t.volume_sells
         buy_ratio = (t.volume_buys / total_vol) if total_vol > 0 else 0.55
 
@@ -969,7 +1049,7 @@ class HitAndRunScorer:
         elif buy_ratio < 0.40:
             red_flags.append(f"sell_heavy:{buy_ratio:.1%}")
 
-        # 5m Momentum check
+        # 2. Momentum Harga 5 Menit
         pump_5m = 0.0
         if t.price_at_5m_ago > 0:
             pump_5m = (t.price - t.price_at_5m_ago) / t.price_at_5m_ago * 100.0
@@ -980,11 +1060,8 @@ class HitAndRunScorer:
         elif pump_5m > self.cfg.max_price_pump_5m_pct:
             red_flags.append(f"pump_overextended:+{pump_5m:.1f}%")
 
-        # ----------------------------------------------------
-        # 2. EVALUASI BERDASARKAN FASE (BONDING vs DEX POOL)
-        # ----------------------------------------------------
+        # 3. Sweetspot MCap / Bonding
         if t.is_migrated:
-            # === FASE DEX POOL (Meteora DLMM / Raydium / Post-Migrate) ===
             if self.cfg.min_market_cap_usd <= t.market_cap_usd <= self.cfg.max_market_cap_usd:
                 score += 25.0
                 reasons.append(f"mcap_sweetspot:${t.market_cap_usd:,.0f}")
@@ -1000,11 +1077,7 @@ class HitAndRunScorer:
             if t.pool_age_minutes <= self.cfg.max_pool_age_minutes:
                 score += 10.0
                 reasons.append(f"pool_fresh:{t.pool_age_minutes:.0f}m")
-            else:
-                red_flags.append(f"pool_too_old:{t.pool_age_minutes:.0f}m")
-
         else:
-            # === FASE BONDING CURVE (Pump.fun) ===
             if self.cfg.min_bonding_pct <= t.bonding_pct <= self.cfg.max_bonding_pct:
                 score += 25.0
                 reasons.append(f"bonding_sweetspot:{t.bonding_pct:.1f}%")
@@ -1017,12 +1090,8 @@ class HitAndRunScorer:
                 score += 15.0
                 reasons.append(f"bonding_liq:${t.liquidity_usd:,.0f}")
 
-        # ----------------------------------------------------
-        # 3. BIRTH SIGNALS (Kecepatan Inflow & Kualitas Buyer)
-        # ----------------------------------------------------
+        # 4. Kualitas Alpha & Trader Unik
         birth_score = 0.0
-
-        # Alpha Wallets
         if t.alpha_wallet_count >= self.cfg.strong_alpha_wallets:
             birth_score += 25
             reasons.append(f"alpha_wallets_strong:{t.alpha_wallet_count}")
@@ -1030,7 +1099,6 @@ class HitAndRunScorer:
             birth_score += 15
             reasons.append(f"alpha_wallets_ok:{t.alpha_wallet_count}")
 
-        # Social Presence (X/Twitter, Website, Telegram)
         social_count = sum([t.has_twitter, t.has_telegram, t.has_website])
         if social_count >= 2:
             birth_score += 25
@@ -1039,35 +1107,25 @@ class HitAndRunScorer:
             birth_score += 15
             reasons.append(f"social_present:{social_count}")
 
-        # Velocity
         if t.liquidity_velocity >= self.cfg.min_liquidity_velocity_sol_per_min:
             birth_score += 25
             reasons.append(f"liq_velocity:{t.liquidity_velocity:.2f}SOL/m")
 
-        if t.holder_growth_velocity >= self.cfg.min_holder_growth_per_min:
+        if t.unique_trader_ratio >= 0.50:
             birth_score += 25
-            reasons.append(f"holder_velocity:{t.holder_growth_velocity:.1f}h/m")
+            reasons.append(f"organic_traders:{t.unique_trader_ratio:.0%}")
 
         t.birth_signal_score = min(100.0, birth_score)
-        score += t.birth_signal_score * 0.25  # Bobot tambahan 25 poin maksimal
+        score += t.birth_signal_score * 0.25
 
         return round(min(100.0, score), 2), phase, reasons, red_flags
 
 
 # ============================================================
-# 7. HIT-AND-RUN POSITION & SCALP MANAGER
+# 8. POSITION MANAGER
 # ============================================================
 
 class PositionManager:
-    """
-    Eksekusi Hit-and-Run:
-    - Masuk cepat saat pump mengonfirmasi momentum.
-    - TP 1 (+80%): Tarik modal awal (Free Ride).
-    - TP 2 (+200%): Kunci profit tambahan 25%.
-    - Trailing Stop (18%): Kawal moonbag sisa 25% hingga pump berakhir.
-    - Hard SL (-22%): Batasi kerugian jika dump terjadi.
-    - Time Stop (60 min): Keluar jika momentum mati.
-    """
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.positions: Dict[str, Position] = {}
@@ -1109,29 +1167,24 @@ class PositionManager:
         if new_trailing > pos.trailing_price:
             pos.trailing_price = new_trailing
 
-        # 1. Hard Stop Loss
         if price <= pos.stop_price:
             actions.append(("stop_loss", pos.remaining_pct))
             return actions
 
-        # 2. TP 1: Ambil Modal Awal (+80%)
         if not pos.initial_recovered and price >= pos.entry_price * self.cfg.take_initials_multiple:
             pos.initial_recovered = True
             pos.remaining_pct = 50.0
             actions.append(("take_initials_50pct", 50.0))
 
-        # 3. TP 2: Kunci Profit Lanjutan (+200% / 3x)
         if pos.initial_recovered and not pos.tp2_recovered and price >= pos.entry_price * self.cfg.take_profit_2_multiple:
             pos.tp2_recovered = True
             pos.remaining_pct = 25.0
             actions.append(("take_profit_25pct", 25.0))
 
-        # 4. Trailing Stop untuk Sisa Posisi
         if pos.initial_recovered and price <= pos.trailing_price:
             actions.append(("trailing_stop", pos.remaining_pct))
             return actions
 
-        # 5. Time Stop (Hit-and-Run: 60 menit)
         if (time.time() - pos.opened_at) > (self.cfg.time_stop_minutes * 60):
             actions.append(("time_stop", pos.remaining_pct))
             return actions
@@ -1147,7 +1200,7 @@ class PositionManager:
 
 
 # ============================================================
-# 8. TELEGRAM & TRADE LOGGING
+# 9. TELEGRAM ALERTER
 # ============================================================
 
 class TelegramAlerter:
@@ -1162,7 +1215,7 @@ class TelegramAlerter:
             print("[telegram] Token/ChatID kosong, notifikasi lokal aktif")
             return
         self.session = aiohttp.ClientSession()
-        await self._send("⚡ <b>[HIT-AND-RUN] Sniper Engine v11 Online</b>\nMulti-DEX & Momentum Scalper Aktif!")
+        await self._send("⚡ <b>[HIT-AND-RUN] Sniper Engine v12 Online</b>\nAnti-Cabal & Anti-Wash Engine Aktif!")
 
     async def close(self):
         if self.session:
@@ -1182,13 +1235,13 @@ class TelegramAlerter:
             f"<b>Market Cap:</b> <code>${s.market_cap:,.0f}</code>\n"
             f"<b>Liquidity:</b> <code>${s.liquidity:,.0f}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>🛡️ Audit Keamanan:</b>\n"
-            f"  • Mint Auth: {'✅ Revoked' if not t.mint_authority_active else '❌ Aktif'}\n"
-            f"  • Freeze Auth: {'✅ Revoked' if not t.freeze_authority_active else '❌ Aktif'}\n"
+            f"<b>🛡️ Audit Anti-Jebakan:</b>\n"
+            f"  • Anti-Cabal Sybil: {'✅ Bersih' if not t.cabal_cluster_pct else f'⚠️ Cluster {t.cabal_cluster_pct:.1f}%'}\n"
+            f"  • Anti-Wash Volume: {'✅ Organik' if not t.is_wash_trading else '❌ Fake Volume'}\n"
+            f"  • Trader Unik: <code>{t.unique_trader_ratio:.0%}</code>\n"
+            f"  • Mint/Freeze: {'✅ Revoked' if not (t.mint_authority_active or t.freeze_authority_active) else '❌ Aktif'}\n"
             f"  • LP Status: {'✅ Terkunci/Aman' if t.lp_locked else '⚠️ Open Vault'}\n"
             f"  • Dev Holdings: <code>{t.dev_holding_pct:.1f}%</code>\n"
-            f"  • Tax / Fee: <code>{t.transfer_fee_pct:.1f}%</code>\n"
-            f"  • Honeypot Check: {'✅ Normal' if t.sell_simulation_ok else '❌ Gagal'}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<b>🎯 Rencana Hit-and-Run:</b>\n"
             f"  • Stop Loss: -22% (Cut Loss Ketat)\n"
@@ -1200,8 +1253,7 @@ class TelegramAlerter:
             f"<b>Alasan Lolos:</b>\n" +
             "\n".join(f"  • {r}" for r in s.reasons[:5]) +
             f"\n\n🔗 <a href='https://dexscreener.com/solana/{s.mint}'>[DexScreener]</a> · "
-            f"<a href='https://photon-sol.tinyastro.io/en/r/@alpha/{s.mint}'>[Photon]</a> · "
-            f"<a href='https://neo.bullx.io/terminal?chainId=1399811149&address={s.mint}'>[BullX]</a>"
+            f"<a href='https://photon-sol.tinyastro.io/en/r/@alpha/{s.mint}'>[Photon]</a>"
         )
         await self._send(text)
 
@@ -1223,7 +1275,7 @@ class TelegramAlerter:
 
 
 # ============================================================
-# 9. SCANNER ENGINE UTAMA
+# 10. SCANNER ENGINE UTAMA
 # ============================================================
 
 class HitAndRunScanner:
@@ -1231,8 +1283,8 @@ class HitAndRunScanner:
         self.cfg = cfg
         self.cache = TimedCache()
         self.rpc = RpcClient(cfg, self.cache)
-        self.security = SecurityAnalyzer(cfg)
-        self.cluster = WalletClusterAnalyzer(cfg, self.rpc)
+        self.cabal_detector = CabalSybilDetector(cfg, self.rpc)
+        self.wash_detector = WashTradingDetector(cfg)
         self.scorer = HitAndRunScorer(cfg)
         self.positions = PositionManager(cfg)
         self.telegram = TelegramAlerter(cfg.telegram_bot_token, cfg.telegram_chat_id)
@@ -1245,12 +1297,7 @@ class HitAndRunScanner:
         self.rescan_heap: List[Tuple[float, str]] = []
         self.running = True
 
-    # --------------------------------------------------------
-    # 9.1 INGESTION WEBSOCKET & MULTI-DEX DISCOVERY
-    # --------------------------------------------------------
-
     async def pumpportal_listener(self):
-        """Mendengarkan event pump.fun via PumpPortal WebSocket"""
         while self.running:
             try:
                 async with websockets.connect(self.cfg.pumpportal_ws, ping_interval=20, ping_timeout=20) as ws:
@@ -1305,11 +1352,17 @@ class HitAndRunScanner:
                 t.buys_count += 1
                 t.volume_buys += sol_amount
                 t.unique_buyers.add(wallet)
-                if len(self.buyers_buffer[mint]) < 100:
-                    self.buyers_buffer[mint].append({"wallet": wallet, "sol_amount": sol_amount, "timestamp": time.time()})
+                if len(self.buyers_buffer[mint]) < 120:
+                    self.buyers_buffer[mint].append({
+                        "wallet": wallet, "sol_amount": sol_amount, "timestamp": time.time(), "side": "buy"
+                    })
             else:
                 t.sells_count += 1
                 t.volume_sells += sol_amount
+                if len(self.buyers_buffer[mint]) < 120:
+                    self.buyers_buffer[mint].append({
+                        "wallet": wallet, "sol_amount": sol_amount, "timestamp": time.time(), "side": "sell"
+                    })
 
             v_sol = float(msg.get("vSolInBondingCurve", 0) or 0)
             if v_sol > 0:
@@ -1326,10 +1379,6 @@ class HitAndRunScanner:
                 await self.eval_queue.put(mint)
 
     async def dexscreener_discovery_loop(self):
-        """
-        Polling discovery multi-source:
-        Mencakup koin-koin baru di Meteora DLMM, Dynamic AMM, Raydium, dan Boosted tokens.
-        """
         if not self.cfg.enable_dexscreener_discovery:
             return
         print("[discovery] Multi-DEX continuous discovery started")
@@ -1337,7 +1386,6 @@ class HitAndRunScanner:
             try:
                 mints_discovered: List[str] = []
 
-                # 1. Search Queries
                 for q in self.cfg.discovery_queries:
                     try:
                         url = f"{self.cfg.dexscreener_search_url}?q={q}"
@@ -1353,7 +1401,6 @@ class HitAndRunScanner:
                     except Exception:
                         pass
 
-                # 2. Latest Token Profiles & Boosts
                 for boost_url in (self.cfg.dexscreener_boosts_latest, self.cfg.dexscreener_profiles):
                     try:
                         async with self.rpc.sem:
@@ -1368,7 +1415,6 @@ class HitAndRunScanner:
                     except Exception:
                         pass
 
-                # Tambahkan koin baru ke queue evaluasi
                 mints_discovered = list(dict.fromkeys(mints_discovered))
                 for mint in mints_discovered:
                     if mint not in self.tokens:
@@ -1380,13 +1426,9 @@ class HitAndRunScanner:
                         )
                         await self.eval_queue.put(mint)
 
-            except Exception as e:
+            except Exception:
                 pass
             await asyncio.sleep(self.cfg.discovery_interval_sec)
-
-    # --------------------------------------------------------
-    # 9.2 EVALUASI LENGKAP & ANTI-JEBAKAN DEVELOPER
-    # --------------------------------------------------------
 
     async def worker(self, worker_id: int):
         while self.running:
@@ -1396,7 +1438,7 @@ class HitAndRunScanner:
                 continue
             try:
                 await self.evaluate_token(mint)
-            except Exception as e:
+            except Exception:
                 pass
             finally:
                 self.eval_queue.task_done()
@@ -1409,7 +1451,7 @@ class HitAndRunScanner:
         now = time.time()
         age = now - t.created_at
 
-        # 1. AMBIL DATA POOL DEX (Selalu ambil untuk deteksi dini Meteora/Raydium!)
+        # 1. Ambil data pool DEX langsung
         pool_data = await self.rpc.get_pool_data(mint)
         if pool_data and pool_data.get("liquidity_usd", 0) > 1000:
             t.is_migrated = True
@@ -1423,14 +1465,14 @@ class HitAndRunScanner:
             if pool_data.get("created_at", 0) > 0:
                 t.pool_age_minutes = max(0.1, (now - pool_data["created_at"]) / 60.0)
 
-            # Jika koin ditemukan dari DexScreener, isi data transaksi m5
             if t.buys_count == 0:
                 t.buys_count = pool_data.get("buys_m5", 10)
                 t.sells_count = pool_data.get("sells_m5", 4)
                 t.volume_buys = pool_data.get("vol_m5", 5000.0) * 0.65
                 t.volume_sells = pool_data.get("vol_m5", 5000.0) * 0.35
+                t.volume_usd = pool_data.get("vol_m5", 5000.0)
 
-        # 2. PENGECEKAN PARALEL KEAMANAN & SOSIAL
+        # 2. Pengecekan Paralel Keamanan + Detektor Cabal + Detektor Wash
         (
             holders,
             lp_info,
@@ -1453,7 +1495,7 @@ class HitAndRunScanner:
             self.rpc.check_dev_sold(mint, t.creator, t.created_at) if t.creator else self._zero(),
         )
 
-        locked, liq_usd, lp_pool, rug_score, rug_flags = lp_info
+        locked, liq_usd, lp_pool, rug_score, rug_flags, vaults = lp_info
         mint_auth, freeze_auth = authorities
         rugpull_count, _ = creator_rep
         has_tw, has_tg, has_web = social
@@ -1474,18 +1516,61 @@ class HitAndRunScanner:
         t.has_website = has_web
         t.dev_sold_pct = dev_sold
 
-        # 3. KONSENTRASI HOLDER & DEV DUMP CHECK
-        top10_pct, top1_pct, dev_pct = self.security.holder_concentration(holders, lp_pool)
-        t.dev_holding_pct = dev_pct
+        # ====================================================
+        # PISAHKAN KOLAM POOL / AMM VAULT DARI DOMPET PENGGUNA
+        # ====================================================
+        t.pool_vaults.update(vaults)
+        if t.pool_address:
+            t.pool_vaults.add(t.pool_address)
+        if lp_pool:
+            t.pool_vaults.add(lp_pool)
 
-        # 4. ALPHA WALLETS & BUYER QUALITY
+        # 3. ADVANCED ANTI-CABAL SYBIL CHECK (Kolam Likuiditas Dikecualikan)
+        is_cabal, cabal_pct, cabal_wallets, cabal_flags = await self.cabal_detector.detect_cabal_sybil(
+            holders, t.created_at, t.pool_vaults
+        )
+        t.cabal_cluster_pct = cabal_pct
+        t.cabal_wallets_count = cabal_wallets
+
+        # 4. ANTI-WASH TRADING & FAKE VOLUME CHECK
+        is_wash, unique_ratio, wash_flags = self.wash_detector.evaluate_wash(
+            self.buyers_buffer.get(mint, []),
+            t.buys_count,
+            t.sells_count,
+            len(holders),
+            t.volume_usd or (t.volume_buys + t.volume_sells) * 160.0
+        )
+        t.unique_trader_ratio = unique_ratio
+        t.is_wash_trading = is_wash
+        t.wash_flags = wash_flags
+
+        # 5. Dev Holding & Concentration (Murni Dompet Pengguna Asli!)
+        individual_holders = {
+            w: p for w, p in holders.items()
+            if w not in t.pool_vaults and w not in KNOWN_DEX_PROGRAMS
+        }
+
+        # Cek on-chain jika akun top 1 masih memegang > 20% pada koin DEX
+        sorted_individuals = sorted(individual_holders.items(), key=lambda x: x[1], reverse=True)
+        if sorted_individuals and sorted_individuals[0][1] > 20.0 and t.is_migrated:
+            top_cand = sorted_individuals[0][0]
+            if await self.rpc.check_is_amm_vault(top_cand, t.mint):
+                t.pool_vaults.add(top_cand)
+                individual_holders.pop(top_cand, None)
+                sorted_individuals = sorted(individual_holders.items(), key=lambda x: x[1], reverse=True)
+
+        sorted_pcts = [p for _, p in sorted_individuals]
+        top10_pct = sum(sorted_pcts[:10]) if sorted_pcts else 0.0
+        top1_pct = sorted_pcts[0] if sorted_pcts else 0.0
+        t.dev_holding_pct = individual_holders.get(t.creator, 0.0) if t.creator else 0.0
+
+        # Alpha Wallets (Menggunakan Dompet Pengguna Murni)
         early_wallets = [b["wallet"] for b in self.buyers_buffer.get(mint, [])]
-        if not early_wallets and holders:
-            early_wallets = list(holders.keys())[:15]
-
+        if not early_wallets and individual_holders:
+            early_wallets = list(individual_holders.keys())[:15]
         t.alpha_wallet_count = await self.rpc.count_alpha_wallets(early_wallets)
 
-        # 5. VELOCITY INFLOW
+        # Velocity
         if len(t.sol_in_bonding_history) >= 2:
             dt = (t.sol_in_bonding_history[-1][0] - t.sol_in_bonding_history[0][0]) / 60.0
             if dt > 0.05:
@@ -1494,11 +1579,17 @@ class HitAndRunScanner:
             t.liquidity_velocity = (pool_data["vol_m5"] / 160.0) / 5.0
 
         # ----------------------------------------------------
-        # 6. PENILAIAN & AUDIT KEAMANAN KETAT
+        # 6. FILTER RED FLAGS (ANTI-JEBAKAN)
         # ----------------------------------------------------
         red_flags: List[str] = []
 
-        # --- JEBAKAN DEVELOPER (FATAL) ---
+        # --- JEBAKAN CABAL & FAKE VOLUME (BARU) ---
+        if is_cabal:
+            red_flags.extend(cabal_flags)
+        if is_wash:
+            red_flags.extend(wash_flags)
+
+        # --- JEBAKAN DEVELOPER KLASIK ---
         if self.cfg.require_freeze_authority_revoked and freeze_auth:
             red_flags.append("freeze_authority_active")
         if self.cfg.require_mint_authority_revoked and mint_auth:
@@ -1518,23 +1609,18 @@ class HitAndRunScanner:
         if top10_pct > self.cfg.max_top10_holder_pct:
             red_flags.append(f"top10_high:{top10_pct:.1f}%")
 
-        # --- VALIDASI LIKUIDITAS & LP LOCK ---
         if t.is_migrated and self.cfg.require_lp_locked and not locked:
-            # Toleransi jika likuiditas Meteora DLMM besar (> $5k)
             if t.liquidity_usd < self.cfg.min_pool_liquidity_usd:
                 red_flags.append("lp_not_locked")
 
-        # --- HITUNG SKOR MOMENTUM ---
+        # Hitung skor momentum
         score, phase, reasons, score_flags = self.scorer.score_token(t)
         red_flags.extend(score_flags)
         red_flags.extend(rug_flags)
         t.scored = True
 
-        # ----------------------------------------------------
-        # 7. KEPUTUSAN: SKIP (DENGAN RESCAN) ATAU LOLOS SIGNAL
-        # ----------------------------------------------------
+        # Keputusan: Re-scan jika koin potensial sedang mengonfirmasi likuiditas
         if red_flags:
-            # Rescan jika koin potensial sedang mengonfirmasi likuiditas
             if t.rescan_count < self.cfg.max_rescan_count and age < self.cfg.max_rescan_age_sec:
                 t.rescan_count += 1
                 t.scored = False
@@ -1542,7 +1628,7 @@ class HitAndRunScanner:
                 heapq.heappush(self.rescan_heap, (t.next_rescan_at, mint))
             return
 
-        # LOLOS EVALUASI!
+        # LOLOS!
         if score >= self.cfg.min_conviction_score and not t.signal_emitted:
             t.signal_emitted = True
             signal_obj = Signal(
@@ -1556,7 +1642,6 @@ class HitAndRunScanner:
                 timestamp=now,
                 source=t.source,
                 phase=phase,
-                birth_score=t.birth_signal_score,
                 market_cap=t.market_cap_usd,
                 liquidity=t.liquidity_usd,
             )
@@ -1569,10 +1654,6 @@ class HitAndRunScanner:
     async def _zero(self):
         return 0.0
 
-    # --------------------------------------------------------
-    # 9.3 EKSEKUSI TRADING & MANAJEMEN EXIT HIT AND RUN
-    # --------------------------------------------------------
-
     async def signal_consumer(self):
         while self.running:
             try:
@@ -1581,7 +1662,7 @@ class HitAndRunScanner:
                 continue
             try:
                 await self.execute_entry(signal_obj)
-            except Exception as e:
+            except Exception:
                 pass
             finally:
                 self.signal_queue.task_done()
@@ -1633,10 +1714,6 @@ class HitAndRunScanner:
                 pass
             await asyncio.sleep(2.0)
 
-    # --------------------------------------------------------
-    # 9.4 RUN ENGINE
-    # --------------------------------------------------------
-
     async def run(self):
         await self.rpc.start()
         await self.telegram.start()
@@ -1651,7 +1728,7 @@ class HitAndRunScanner:
         for i in range(self.cfg.worker_count):
             tasks.append(asyncio.create_task(self.worker(i)))
 
-        print(f"🚀 [HITRUN-V11] Engine Aktif | Workers={self.cfg.worker_count}")
+        print(f"🚀 [HITRUN-V12] Anti-Cabal & Anti-Wash Online | Workers={self.cfg.worker_count}")
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -1665,7 +1742,7 @@ class HitAndRunScanner:
 
 
 # ============================================================
-# 10. HEALTH SERVER & DASHBOARD API
+# 11. HEALTH SERVER & DASHBOARD API
 # ============================================================
 
 class HealthServer:
@@ -1679,7 +1756,7 @@ class HealthServer:
         def index():
             return jsonify({
                 "service": "hitrun-scanner",
-                "version": "v11-flash-sniper",
+                "version": "v12-anti-cabal-anti-wash",
                 "status": "online",
                 "tokens_tracked": len(self.scanner.tokens),
                 "signals_emitted": len(self.scanner.signals),
@@ -1706,7 +1783,7 @@ class HealthServer:
 
 
 # ============================================================
-# 11. ENTRY POINT
+# 12. ENTRY POINT
 # ============================================================
 
 async def main():
