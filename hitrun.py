@@ -50,6 +50,7 @@ class Config:
 
     # --- Filter DEX Pool (Meteora DLMM / Raydium / Post-Migrate) ---
     enable_dex_pool_evaluation: bool = True
+    enable_dexscreener_discovery: bool = True   # Pencarian otomatis likuiditas DEX multi-platform
     min_market_cap_usd: float = 25_000          # Min $25,000 MCap titik infleksi breakout
     max_market_cap_usd: float = 2_500_000
     max_pool_age_minutes: int = 120             # Max 2 jam pool fresh
@@ -1518,7 +1519,7 @@ class HitAndRunScanner:
                 await self.eval_queue.put(mint)
 
     async def dexscreener_discovery_loop(self):
-        if not self.cfg.enable_dexscreener_discovery:
+        if not getattr(self.cfg, "enable_dexscreener_discovery", True):
             return
         print("[discovery] Multi-DEX continuous discovery started")
         while self.running:
