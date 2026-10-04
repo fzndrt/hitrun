@@ -35,9 +35,9 @@ class Config:
     observation_window_sec: int = 15
     min_age_sec: int = 2
     enable_rescan: bool = True
-    rescan_delay_sec: int = 12
-    max_rescan_count: int = 12
-    max_rescan_age_sec: int = 10800           # 3 jam max umur koin
+    rescan_delay_sec: int = 20
+    max_rescan_count: int = 50                  # Mampu memantau token hingga 3-4 jam
+    max_rescan_age_sec: int = 14400             # 4 jam max umur koin untuk menangkap runner 1 jam pasca launch
 
     # --- Momentum & Filter Harga (Masuk di Awal Pompa) ---
     max_price_pump_5m_pct: float = 120.0
@@ -46,14 +46,15 @@ class Config:
 
     # --- Filter Kurva Bonding (Pump.fun) ---
     min_bonding_pct: float = 10.0               # Wajib sudah lepas landas (>=10% bukan koin mati)
-    max_bonding_pct: float = 70.0               # Masih punya ruang pump sebelum top
+    max_bonding_pct: float = 75.0               # Masih punya ruang pump sebelum top
 
-    # --- Filter DEX Pool (Meteora DLMM / Raydium / Post-Migrate) ---
+    # --- Filter DEX Pool (Meteora DLMM / Raydium / Post-Migrate / 1-4 Hour Runners) ---
     enable_dex_pool_evaluation: bool = True
     enable_dexscreener_discovery: bool = True   # Pencarian otomatis likuiditas DEX multi-platform
-    min_market_cap_usd: float = 25_000          # Min $25,000 MCap titik infleksi breakout
-    max_market_cap_usd: float = 2_500_000
-    max_pool_age_minutes: int = 120             # Max 2 jam pool fresh
+    enable_token_profiles_discovery: bool = True # Pemindaian token profil DexScreener terbaru
+    min_market_cap_usd: float = 20_000          # Min $20,000 MCap titik infleksi breakout
+    max_market_cap_usd: float = 3_500_000       # Hingga $3.5M MCap untuk runner breakout
+    max_pool_age_minutes: int = 240             # Hingga 4 jam (menangkap koin 1-3 jam pasca launch)
     min_pool_liquidity_usd: float = 7_000       # Min $7,000 likuiditas asli
 
     # --- KEAMANAN ANTI-JEBAKAN DEVELOPER (NON-NEGOTIABLE) ---
@@ -1162,20 +1163,23 @@ class HitAndRunScorer:
         else:
             red_flags.append(f"weak_buy_pressure:{buy_ratio:.1%}<{self.cfg.min_buy_volume_ratio:.0%}")
 
-        # 2. Momentum Harga 5 Menit (Wajib Positif & Sedang Memompa, Bukan Flat/Dump!)
+        # 2. Momentum Harga 5 Menit (Wajib Positif/Konsolidasi Sehat & Bukan Dump!)
         pump_5m = 0.0
         if t.price_at_5m_ago > 0:
             pump_5m = (t.price - t.price_at_5m_ago) / t.price_at_5m_ago * 100.0
-            if pump_5m < 0:
+            if pump_5m < -5.0:
                 red_flags.append(f"price_dumping_5m:{pump_5m:.1f}%")
 
         if self.cfg.min_price_pump_5m_pct <= pump_5m <= self.cfg.max_price_pump_5m_pct:
             score += min(25.0, pump_5m * 0.4)
             reasons.append(f"momentum_5m:+{pump_5m:.1f}%")
+        elif -5.0 <= pump_5m < self.cfg.min_price_pump_5m_pct and buy_ratio >= 0.60:
+            score += 15.0
+            reasons.append(f"consolidation_dip_support:{pump_5m:+.1f}%")
         elif pump_5m > self.cfg.max_price_pump_5m_pct:
             red_flags.append(f"pump_overextended:+{pump_5m:.1f}%")
 
-        # 3. Sweetspot MCap / Bonding
+        # 3. Sweetspot MCap / Bonding (Mencakup Fase Fresh & Runner 1-4 Jam)
         if t.is_migrated:
             if self.cfg.min_market_cap_usd <= t.market_cap_usd <= self.cfg.max_market_cap_usd:
                 score += 25.0
@@ -1191,7 +1195,10 @@ class HitAndRunScorer:
 
             if t.pool_age_minutes <= self.cfg.max_pool_age_minutes:
                 score += 10.0
-                reasons.append(f"pool_fresh:{t.pool_age_minutes:.0f}m")
+                age_label = "pool_fresh" if t.pool_age_minutes < 30 else "pool_runner_1h_plus"
+                reasons.append(f"{age_label}:{t.pool_age_minutes:.0f}m")
+            else:
+                red_flags.append(f"pool_too_old:{t.pool_age_minutes:.0f}m")
         else:
             if self.cfg.min_bonding_pct <= t.bonding_pct <= self.cfg.max_bonding_pct:
                 score += 25.0
@@ -1474,8 +1481,9 @@ class HitAndRunScanner:
             )
             t.sol_in_bonding_history.append((time.time(), v_sol))
             self.tokens[mint] = t
-            # JANGAN langsung lempar evaluasi di detik 0 saat holder masih 0.
-            # Token didaftarkan, dan evaluasi akan dipicu saat pembeli organik pertama masuk.
+            # Jadwalkan rescan otomatis awal (T+35 detik) untuk memeriksa traksi pembeli
+            t.next_rescan_at = time.time() + 35.0
+            heapq.heappush(self.rescan_heap, (t.next_rescan_at, mint))
 
         elif tx_type in ("buy", "sell"):
             t = self.tokens.get(mint)
@@ -1521,11 +1529,28 @@ class HitAndRunScanner:
     async def dexscreener_discovery_loop(self):
         if not getattr(self.cfg, "enable_dexscreener_discovery", True):
             return
-        print("[discovery] Multi-DEX continuous discovery started")
+        print("[discovery] Multi-DEX & 1-4h Runner continuous discovery started")
         while self.running:
             try:
                 mints_discovered: List[str] = []
 
+                # 1. Pemindaian Token Profiles Terbaru (Mendeteksi Koin Potensial dengan Tim/Komunitas/Sosial Aktif)
+                if getattr(self.cfg, "enable_token_profiles_discovery", True):
+                    try:
+                        url_profiles = "https://api.dexscreener.com/token-profiles/latest/v1"
+                        async with self.rpc.sem:
+                            async with self.rpc.session.get(url_profiles) as resp:
+                                if resp.status == 200:
+                                    profiles = await resp.json()
+                                    for item in (profiles or []):
+                                        if item.get("chainId") == "solana":
+                                            addr = item.get("tokenAddress")
+                                            if addr:
+                                                mints_discovered.append(addr)
+                    except Exception:
+                        pass
+
+                # 2. Pemindaian Multi-DEX Search (Raydium, Meteora DLMM, Orca)
                 for q in self.cfg.discovery_queries:
                     try:
                         url = f"{self.cfg.dexscreener_search_url}?q={q}"
@@ -1538,40 +1563,51 @@ class HitAndRunScanner:
                                             liq_usd = float(p.get("liquidity", {}).get("usd", 0) or 0)
                                             buys_m5 = int(p.get("txns", {}).get("m5", {}).get("buys", 0) or 0)
                                             sells_m5 = int(p.get("txns", {}).get("m5", {}).get("sells", 0) or 0)
+                                            buys_h1 = int(p.get("txns", {}).get("h1", {}).get("buys", 0) or 0)
+                                            sells_h1 = int(p.get("txns", {}).get("h1", {}).get("sells", 0) or 0)
                                             vol_m5 = float(p.get("volume", {}).get("m5", 0) or 0)
+                                            vol_h1 = float(p.get("volume", {}).get("h1", 0) or 0)
                                             change_m5 = float(p.get("priceChange", {}).get("m5", 0) or 0)
+                                            change_h1 = float(p.get("priceChange", {}).get("h1", 0) or 0)
 
-                                            # FILTER KETAT ANTI-DUMP & ANTI-KOIN MATI:
-                                            # 1. Likuiditas nyata >= $6,000
-                                            # 2. Transaksi beli aktif m5 >= 8
-                                            # 3. Pembeli harus mendominasi penjual (buys >= sells * 1.2)
-                                            # 4. Volume 5m >= $2,500
-                                            # 5. Momentum harga 5m harus positif (>= +2.0%, BUKAN SEDANG DUMP!)
-                                            if (
+                                            # Jalur A: Fresh Surge (Pompa awal 5 menit)
+                                            is_fresh_surge = (
                                                 liq_usd >= self.cfg.min_pool_liquidity_usd and
                                                 buys_m5 >= self.cfg.min_organic_buys_m5 and
-                                                buys_m5 >= (sells_m5 * 1.2) and
-                                                vol_m5 >= 2500 and
+                                                buys_m5 >= (sells_m5 * 1.1) and
+                                                vol_m5 >= 1500 and
                                                 change_m5 >= 2.0
-                                            ):
+                                            )
+
+                                            # Jalur B: 1-4 Hour Runner Breakout (Seperti Knight Cat & Runner Konsolidasi Pasca 1 Jam)
+                                            is_hour_runner = (
+                                                liq_usd >= self.cfg.min_pool_liquidity_usd and
+                                                buys_h1 >= 30 and
+                                                buys_h1 >= (sells_h1 * 1.15) and
+                                                vol_h1 >= 6000 and
+                                                change_h1 >= 10.0 and
+                                                change_m5 >= -4.0  # Bukan sedang dump tajam
+                                            )
+
+                                            if is_fresh_surge or is_hour_runner:
                                                 addr = p.get("baseToken", {}).get("address")
                                                 if addr:
                                                     mints_discovered.append(addr)
                     except Exception:
                         pass
 
-                # DIHAPUS: dexscreener_boosts_latest & token_profiles
-                # Karena 95% koin di sana adalah honeypot/scam berbayar yang dirancang untuk membanting sniper bot!
-
                 mints_discovered = list(dict.fromkeys(mints_discovered))
                 for mint in mints_discovered:
-                    if mint not in self.tokens:
+                    t = self.tokens.get(mint)
+                    if not t:
                         self.tokens[mint] = TokenState(
                             mint=mint,
                             creator="",
                             source="dexscreener",
                             created_at=time.time(),
                         )
+                        await self.eval_queue.put(mint)
+                    elif not t.signal_emitted and not t.scored:
                         await self.eval_queue.put(mint)
 
             except Exception:
@@ -1801,12 +1837,34 @@ class HitAndRunScanner:
         red_flags.extend(rug_flags)
         t.scored = True
 
-        # Keputusan: Re-scan jika koin potensial sedang mengonfirmasi likuiditas
+        # Keputusan: Re-scan jika koin potensial sedang mengonfirmasi likuiditas atau menunggu pool DLMM
         if red_flags:
-            if t.rescan_count < self.cfg.max_rescan_count and age < self.cfg.max_rescan_age_sec:
+            # Periksa apakah ada bendera merah fatal yang tidak bisa diperbaiki (scam/rug permanen)
+            fatal_keywords = (
+                "mint_authority_active", "freeze_authority_active", "honeypot",
+                "transfer_tax_high", "creator_rugpull_history", "dev_dumped",
+                "cabal_sybil", "top1_whale", "top10_high"
+            )
+            is_fatal = any(any(k in flag for k in fatal_keywords) for flag in red_flags)
+
+            # Jika koin aman dari scam permanen dan hanya dalam fase inkubasi (menunggu injeksi pool DEX/volume pembeli):
+            if not is_fatal and t.rescan_count < self.cfg.max_rescan_count and age < self.cfg.max_rescan_age_sec:
                 t.rescan_count += 1
                 t.scored = False
-                t.next_rescan_at = now + self.cfg.rescan_delay_sec
+                # Smart multi-stage delay:
+                # 0-3 menit: 20 detik (menangkap lepas landas Pump.fun)
+                # 3-15 menit: 45 detik (menangkap pembentukan pool Raydium/Meteora)
+                # 15-60 menit: 90 detik (menangkap koin 1 jam yang sedang konsolidasi)
+                # 1-4 jam: 180 detik (menangkap breakout runner seperti Knight Cat)
+                if age < 180:
+                    delay = 20.0
+                elif age < 900:
+                    delay = 45.0
+                elif age < 3600:
+                    delay = 90.0
+                else:
+                    delay = 180.0
+                t.next_rescan_at = now + delay
                 heapq.heappush(self.rescan_heap, (t.next_rescan_at, mint))
             return
 
