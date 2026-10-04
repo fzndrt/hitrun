@@ -41,73 +41,73 @@ class Config:
 
     # --- Momentum & Filter Harga (Masuk di Awal Pompa) ---
     max_price_pump_5m_pct: float = 120.0
-    min_price_pump_5m_pct: float = 2.0
-    min_buy_volume_ratio: float = 0.52
+    min_price_pump_5m_pct: float = 3.0
+    min_buy_volume_ratio: float = 0.60          # Wajib pembeli dominan kuat (>=60%)
 
     # --- Filter Kurva Bonding (Pump.fun) ---
-    min_bonding_pct: float = 6.0              # Lolos dari spam bot 0-5%
-    max_bonding_pct: float = 75.0             # Masih punya ruang 3x-8x sebelum migrasi
+    min_bonding_pct: float = 10.0               # Wajib sudah lepas landas (>=10% bukan koin mati)
+    max_bonding_pct: float = 70.0               # Masih punya ruang pump sebelum top
 
     # --- Filter DEX Pool (Meteora DLMM / Raydium / Post-Migrate) ---
     enable_dex_pool_evaluation: bool = True
-    min_market_cap_usd: float = 12_000
+    min_market_cap_usd: float = 25_000          # Min $25,000 MCap titik infleksi breakout
     max_market_cap_usd: float = 2_500_000
-    max_pool_age_minutes: int = 180
-    min_pool_liquidity_usd: float = 4_000
+    max_pool_age_minutes: int = 120             # Max 2 jam pool fresh
+    min_pool_liquidity_usd: float = 7_000       # Min $7,000 likuiditas asli
 
     # --- KEAMANAN ANTI-JEBAKAN DEVELOPER (NON-NEGOTIABLE) ---
     require_mint_authority_revoked: bool = True
     require_freeze_authority_revoked: bool = True
     require_metadata_immutable: bool = False
-    enable_sell_simulation: bool = True       # Anti-Honeypot
+    enable_sell_simulation: bool = True         # Anti-Honeypot
     min_sell_recovery_pct: float = 60.0
     max_transfer_fee_pct: float = 5.0
     max_buy_tax_pct: float = 6.0
     max_creator_rugpull_count: int = 0
 
-    # --- Dev & Single Holder Concentration ---
-    max_top10_holder_pct: float = 38.0
-    max_top1_holder_pct: float = 12.0
-    max_dev_holding_pct: float = 6.5
-    max_dev_sell_pct: float = 40.0
-    max_rugcheck_score: float = 70.0
+    # --- 100X RUNNER DNA: KONSENTRASI SANGAT TERSEBAR (ZERO MONOPOLY) ---
+    max_top10_holder_pct: float = 28.0          # Top 10 akumulasi max 28% (desentralisasi ekstrem)
+    max_top1_holder_pct: float = 6.0            # Top 1 holder di luar pool max 6%
+    max_dev_holding_pct: float = 3.5            # Dev holding max 3.5% (Dev serakah langsung ditolak!)
+    max_dev_sell_pct: float = 100.0             # Dev dump awal justru bagus (CTO pattern) asalkan holding <= 3.5%
+    max_rugcheck_score: float = 50.0            # Maksimal skor risiko RugCheck (makin kecil makin aman)
 
-    # --- Syarat Mutlak Koin Hidup (Anti-Ghost & Anti-Koin Langsung Mati) ---
-    min_holders_count: int = 10               # Wajib minimal 10 pemegang asli (bukan ghost token)
-    min_dex_holders_count: int = 16           # Di DEX pool wajib minimal 16 pemegang asli
-    min_unique_buyers_count: int = 5          # Minimal 5 pembeli unik berbeda
-    min_organic_buys_m5: int = 6              # Minimal 6 transaksi beli di 5 menit terakhir
-    min_volume_buys_sol: float = 4.0          # Minimal 4 SOL akumulasi pembelian nyata
+    # --- Syarat Mutlak Koin Hidup (Retail Army - Pasukan Pembeli Unik) ---
+    min_holders_count: int = 16                 # Wajib minimal 16 pemegang asli
+    min_dex_holders_count: int = 22             # Di DEX pool wajib minimal 22 pemegang asli
+    min_unique_buyers_count: int = 8            # Minimal 8 pembeli unik berbeda
+    min_organic_buys_m5: int = 10               # Minimal 10 transaksi beli di 5 menit terakhir
+    min_volume_buys_sol: float = 7.0            # Minimal 7 SOL akumulasi pembelian nyata
 
     # --- ANTI-DEV LINKAGE & INDEPENDENT BUYER VERIFICATION ---
     enable_dev_linkage_check: bool = True
-    max_dev_linked_holding_pct: float = 8.0   # Akumulasi holding dev + dompet afiliasi dev
-    min_unlinked_holders_count: int = 8       # Wajib minimal 8 holder yang 100% independen dari dev
-    min_unlinked_dex_holders_count: int = 14  # Wajib minimal 14 holder independen di DEX pool
-    min_unlinked_buyers_count: int = 4        # Wajib minimal 4 pembeli unik independen (tidak terkait dev)
+    max_dev_linked_holding_pct: float = 4.5     # Akumulasi holding dev + afiliasi max 4.5%
+    min_unlinked_holders_count: int = 14        # Wajib minimal 14 holder yang 100% independen dari dev
+    min_unlinked_dex_holders_count: int = 18    # Wajib minimal 18 holder independen di DEX pool
+    min_unlinked_buyers_count: int = 6          # Wajib minimal 6 pembeli unik independen (Retail Army)
 
     # ========================================================
     # ANTI-CABAL SYBIL MULTI-WALLET (Solusi Developer Pecah Dompet)
     # ========================================================
     enable_cabal_sybil_check: bool = True
-    max_cabal_cluster_holding_pct: float = 12.0  # Akumulasi gabungan dompet dari 1 funder
-    max_sybil_similar_wallets: int = 4          # Max dompet dengan saldo/porsi identik
+    max_cabal_cluster_holding_pct: float = 10.0 # Akumulasi gabungan dompet dari 1 funder max 10%
+    max_sybil_similar_wallets: int = 3          # Max dompet dengan saldo/porsi identik
     cabal_funding_window_hours: int = 48        # Lacak transaksi pendanaan 48 jam ke belakang
-    max_fresh_sybil_ratio: float = 0.65         # Max rasio dompet baru di top holder
+    max_fresh_sybil_ratio: float = 0.60         # Max rasio dompet baru di top holder
 
     # ========================================================
     # ANTI-WASH TRADING & FAKE VOLUME ENGINE
     # ========================================================
     enable_wash_trading_check: bool = True
-    min_unique_trader_ratio: float = 0.38       # Minimal 38% trader unik (bukan bot bolak-balik)
-    min_real_median_buy_sol: float = 0.04       # Minimal median buy agar bukan spam debu 0.001 SOL
+    min_unique_trader_ratio: float = 0.45       # Minimal 45% trader unik (bukan bot bolak-balik)
+    min_real_median_buy_sol: float = 0.05       # Minimal median buy agar bukan spam debu
     max_wash_ping_pong_count: int = 2           # Max dompet yang bolak-balik buy-sell kilat
     min_volume_to_holder_ratio: float = 1.0     # Volume tinggi harus menghasilkan pertambahan holder
 
     # --- LP Lock & Likuiditas Meteora/Raydium ---
     require_lp_locked: bool = True
     min_lp_locked_pct: float = 85.0
-    meteora_min_liquidity_usd: float = 3_500
+    meteora_min_liquidity_usd: float = 7_000
 
     # --- Velocity & Sinyal Kelahiran ---
     enable_birth_signal_check: bool = True
@@ -118,12 +118,12 @@ class Config:
     strong_alpha_wallets: int = 3
     detect_creation_block_bundle: bool = True
     max_creation_block_buyers: int = 5
-    min_liquidity_velocity_sol_per_min: float = 0.2
-    min_holder_growth_per_min: float = 0.4
+    min_liquidity_velocity_sol_per_min: float = 0.25
+    min_holder_growth_per_min: float = 0.5
     check_social_presence: bool = True
 
-    # --- Skor Minimum Masuk ---
-    min_conviction_score: float = 55.0
+    # --- Skor Minimum Masuk (HANYA GRADE-A SNIPER 100x RUNNER DNA) ---
+    min_conviction_score: float = 80.0          # Hanya sinyal dengan DNA Runner sejati (>= 80.0)
 
     # --- MANAJEMEN POSISI & EXIT PLAN (HIT AND RUN) ---
     position_size_pct: float = 3.0
@@ -1148,18 +1148,25 @@ class HitAndRunScorer:
 
         # 1. Rasio Pembeli Nyata
         total_vol = t.volume_buys + t.volume_sells
-        buy_ratio = (t.volume_buys / total_vol) if total_vol > 0 else 0.55
+        min_vol_needed = (self.cfg.min_volume_buys_sol * 160.0) if not t.is_migrated else 2500.0
+        if total_vol < min_vol_needed:
+            red_flags.append(f"insufficient_volume:${total_vol:,.0f}<${min_vol_needed:,.0f}")
+            buy_ratio = 0.0
+        else:
+            buy_ratio = (t.volume_buys / total_vol) if total_vol > 0 else 0.0
 
         if buy_ratio >= self.cfg.min_buy_volume_ratio:
             score += 25 * buy_ratio
             reasons.append(f"buy_pressure:{buy_ratio:.1%}")
-        elif buy_ratio < 0.40:
-            red_flags.append(f"sell_heavy:{buy_ratio:.1%}")
+        else:
+            red_flags.append(f"weak_buy_pressure:{buy_ratio:.1%}<{self.cfg.min_buy_volume_ratio:.0%}")
 
-        # 2. Momentum Harga 5 Menit
+        # 2. Momentum Harga 5 Menit (Wajib Positif & Sedang Memompa, Bukan Flat/Dump!)
         pump_5m = 0.0
         if t.price_at_5m_ago > 0:
             pump_5m = (t.price - t.price_at_5m_ago) / t.price_at_5m_ago * 100.0
+            if pump_5m < 0:
+                red_flags.append(f"price_dumping_5m:{pump_5m:.1f}%")
 
         if self.cfg.min_price_pump_5m_pct <= pump_5m <= self.cfg.max_price_pump_5m_pct:
             score += min(25.0, pump_5m * 0.4)
@@ -1223,7 +1230,25 @@ class HitAndRunScorer:
             reasons.append(f"organic_traders:{t.unique_trader_ratio:.0%}")
 
         t.birth_signal_score = min(100.0, birth_score)
-        score += t.birth_signal_score * 0.25
+        score += t.birth_signal_score * 0.20
+
+        # 5. PILAR 100x RUNNER DNA (MULTI-BAGGER ACCUMULATION PATTERN)
+        # A. Dev Exit / CTO / Zero Greedy Dev Stash
+        if t.dev_holding_pct <= 1.5:
+            score += 10.0
+            reasons.append(f"runner_clean_dev:{t.dev_holding_pct:.1f}%")
+        elif t.dev_holding_pct > self.cfg.max_dev_holding_pct:
+            red_flags.append(f"greedy_dev:{t.dev_holding_pct:.1f}%>{self.cfg.max_dev_holding_pct}%")
+
+        # B. Retail Army - Pasukan Dompet Mandiri (Bukan 1 Paus)
+        if t.unlinked_buyers_count >= self.cfg.min_unlinked_buyers_count and t.unique_trader_ratio >= 0.50:
+            score += 10.0
+            reasons.append(f"runner_retail_army:{t.unlinked_buyers_count}buyers_{t.unique_trader_ratio:.0%}unique")
+
+        # C. Dip Absorption Kuat (Lantai Harga Selalu Naik)
+        if buy_ratio >= 0.65:
+            score += 10.0
+            reasons.append(f"runner_dip_absorption:{buy_ratio:.1%}buys")
 
         return round(min(100.0, score), 2), phase, reasons, red_flags
 
@@ -1511,28 +1536,31 @@ class HitAndRunScanner:
                                         if p.get("chainId") == "solana":
                                             liq_usd = float(p.get("liquidity", {}).get("usd", 0) or 0)
                                             buys_m5 = int(p.get("txns", {}).get("m5", {}).get("buys", 0) or 0)
+                                            sells_m5 = int(p.get("txns", {}).get("m5", {}).get("sells", 0) or 0)
                                             vol_m5 = float(p.get("volume", {}).get("m5", 0) or 0)
-                                            # Saring koin mati: Wajib likuiditas >= $3.5k dan ada aktivitas beli aktif m5
-                                            if liq_usd >= self.cfg.min_pool_liquidity_usd and buys_m5 >= self.cfg.min_organic_buys_m5 and vol_m5 >= 1000:
+                                            change_m5 = float(p.get("priceChange", {}).get("m5", 0) or 0)
+
+                                            # FILTER KETAT ANTI-DUMP & ANTI-KOIN MATI:
+                                            # 1. Likuiditas nyata >= $6,000
+                                            # 2. Transaksi beli aktif m5 >= 8
+                                            # 3. Pembeli harus mendominasi penjual (buys >= sells * 1.2)
+                                            # 4. Volume 5m >= $2,500
+                                            # 5. Momentum harga 5m harus positif (>= +2.0%, BUKAN SEDANG DUMP!)
+                                            if (
+                                                liq_usd >= self.cfg.min_pool_liquidity_usd and
+                                                buys_m5 >= self.cfg.min_organic_buys_m5 and
+                                                buys_m5 >= (sells_m5 * 1.2) and
+                                                vol_m5 >= 2500 and
+                                                change_m5 >= 2.0
+                                            ):
                                                 addr = p.get("baseToken", {}).get("address")
                                                 if addr:
                                                     mints_discovered.append(addr)
                     except Exception:
                         pass
 
-                for boost_url in (self.cfg.dexscreener_boosts_latest, self.cfg.dexscreener_profiles):
-                    try:
-                        async with self.rpc.sem:
-                            async with self.rpc.session.get(boost_url) as resp:
-                                if resp.status == 200:
-                                    items = await resp.json()
-                                    for it in (items or [])[:30]:
-                                        if it.get("chainId") == "solana":
-                                            addr = it.get("tokenAddress")
-                                            if addr:
-                                                mints_discovered.append(addr)
-                    except Exception:
-                        pass
+                # DIHAPUS: dexscreener_boosts_latest & token_profiles
+                # Karena 95% koin di sana adalah honeypot/scam berbayar yang dirancang untuk membanting sniper bot!
 
                 mints_discovered = list(dict.fromkeys(mints_discovered))
                 for mint in mints_discovered:
@@ -1572,7 +1600,7 @@ class HitAndRunScanner:
 
         # 1. Ambil data pool DEX langsung
         pool_data = await self.rpc.get_pool_data(mint)
-        if pool_data and pool_data.get("liquidity_usd", 0) > 1000:
+        if pool_data and pool_data.get("liquidity_usd", 0) >= self.cfg.min_pool_liquidity_usd:
             t.is_migrated = True
             t.dex_id = pool_data.get("dex_id", "dex")
             t.name = pool_data.get("name", t.name or "Unknown")
@@ -1585,11 +1613,13 @@ class HitAndRunScanner:
                 t.pool_age_minutes = max(0.1, (now - pool_data["created_at"]) / 60.0)
 
             if t.buys_count == 0:
-                t.buys_count = pool_data.get("buys_m5", 10)
-                t.sells_count = pool_data.get("sells_m5", 4)
-                t.volume_buys = pool_data.get("vol_m5", 5000.0) * 0.65
-                t.volume_sells = pool_data.get("vol_m5", 5000.0) * 0.35
-                t.volume_usd = pool_data.get("vol_m5", 5000.0)
+                t.buys_count = int(pool_data.get("buys_m5", 0) or 0)
+                t.sells_count = int(pool_data.get("sells_m5", 0) or 0)
+                vol = float(pool_data.get("vol_m5", 0.0) or 0.0)
+                total_tx = max(1, t.buys_count + t.sells_count)
+                t.volume_buys = vol * (t.buys_count / total_tx)
+                t.volume_sells = vol * (t.sells_count / total_tx)
+                t.volume_usd = vol
 
         # 2. Pengecekan Paralel Keamanan + Detektor Cabal + Detektor Wash
         (
