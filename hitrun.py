@@ -186,6 +186,7 @@ class Config:
     geckoterminal_interval_sec: int = 15
 
     discovery_queries: Tuple[str, ...] = (
+        "pumpswap", "pump", "sol", "raydium", "meteora",
         "SOL", "PUMP", "RAY", "METEORA", "USDC",
         "AI", "TRUMP", "DOGE", "PEPE", "CAT",
         "BONK", "WIF", "MEME", "SPEC", "MOON",
@@ -353,20 +354,26 @@ KNOWN_DEX_PROGRAMS = {
     "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",  # Raydium Authority
     "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",  # Raydium CPMM
     "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",  # Raydium CLMM
+    "DNXgeM9EiiaAbaWvwjHj9fQnb44a2PQQu24ghREGLGu3",  # Raydium CPMM Authority
     "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX",  # OpenBook DEX
     # Meteora
     "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",  # Meteora DLMM Program
     "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB",  # Meteora Dynamic AMM
     "24Uqj9JCLxUeoC3hGfh5W3s9FM9uCHDS2SG3LYwBpyTi",  # Meteora Vault Program
+    "M2mx93ekt1fmXSVkTrUL9xVFHkmME8HTUi5Cyc5aF7K",  # Meteora Authority
     # Pump.fun
     "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # Pump.fun Program
     "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasJJL7Xx8p9F1b",  # Pump.fun Authority
-    # Orca & Moonshot
-    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Orca Whirlpool
-    "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG",  # Moonshot
     # PumpSwap (Pump.fun new AMM Migration DEX)
     "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",  # PumpSwap Program
     "BSfD6SHZigAfDWSFRzkghngYKEdukHgdHxoUmVYgpx4C",  # PumpSwap Authority
+    "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf",  # PumpSwap Global
+    # Orca & Moonshot & Phoenix & Lifinity
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Orca Whirlpool
+    "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG",  # Moonshot
+    "MSFee4T1ZsK3h3A14g6iLwB5441Z2aLdJ4K1o7zW547",  # Moonshot Fee
+    "PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY",  # Phoenix DEX
+    "2wT8Yq49kHgDzXuPxZSaeLaH1qbmGXtEyPy64bL7aD3c",  # Lifinity V2
 }
 
 class RpcClient:
@@ -378,11 +385,18 @@ class RpcClient:
 
     async def check_is_amm_vault(self, address: str, mint: str) -> bool:
         """
-        Cek apakah sebuah address holder sebenarnya adalah Token Account milik Program AMM/Pool.
+        Pemeriksaan on-chain matematis presisi tinggi untuk membedakan antara:
+        1. AMM Liquidity Pool Vault / Smart Contract / PDA (DIKECUALIKAN dari hitungan paus)
+        2. Dompet Pribadi Manusia / Individual Whale (TETAP diaudit untuk anti-paus)
         """
         cached = self.cache.get(f"ammvault:{address}", 300)
         if cached is not None:
             return cached
+
+        # 1. Cek langsung jika address itu sendiri terdaftar di daftar program/otoritas DEX
+        if address in KNOWN_DEX_PROGRAMS:
+            self.cache.set(f"ammvault:{address}", True)
+            return True
 
         payload = {
             "jsonrpc": "2.0", "id": "1",
@@ -407,6 +421,7 @@ class RpcClient:
             return False
 
         owner = value.get("owner", "")
+        # Jika akun itu sendiri dimiliki langsung oleh DEX program
         if owner in KNOWN_DEX_PROGRAMS:
             self.cache.set(f"ammvault:{address}", True)
             return True
@@ -414,11 +429,18 @@ class RpcClient:
         parsed = (value.get("data") or {}).get("parsed") or {}
         info = parsed.get("info") or {}
         token_owner = info.get("owner", "")
-        if token_owner in KNOWN_DEX_PROGRAMS:
+        delegate = info.get("delegate", "")
+
+        # Jika entitas pemilik token account atau delegate ada di KNOWN_DEX_PROGRAMS
+        if token_owner in KNOWN_DEX_PROGRAMS or delegate in KNOWN_DEX_PROGRAMS:
             self.cache.set(f"ammvault:{address}", True)
             return True
 
-        # Cek jika pemilik token_owner adalah program DEX (seperti PumpSwap Pool)
+        # Analisis Arsitektur Solana:
+        # Pada Solana, semua dompet manusia pribadi (Phantom, Solflare, dll) wajib bertipe akun dasar
+        # yang dimiliki oleh System Program (11111111111111111111111111111111).
+        # Jika token_owner memiliki akun yang pemiliknya BUKAN System Program, maka entitas tersebut
+        # adalah Program Derived Address (PDA), Smart Contract, AMM Pool State, atau Liquidity Escrow!
         if token_owner:
             payload_owner = {
                 "jsonrpc": "2.0", "id": "1",
@@ -429,8 +451,24 @@ class RpcClient:
                 async with self.session.post(self.cfg.public_rpc_url, json=payload_owner, headers={"User-Agent": "Mozilla/5.0"}) as resp_owner:
                     if resp_owner.status == 200:
                         data_owner = await resp_owner.json()
-                        owner_prog = (data_owner.get("result") or {}).get("value", {}).get("owner", "")
+                        val_owner = (data_owner.get("result") or {}).get("value") or {}
+                        owner_prog = val_owner.get("owner", "")
+
+                        # A. Jika pemilik akun adalah program DEX terdaftar
                         if owner_prog in KNOWN_DEX_PROGRAMS:
+                            self.cache.set(f"ammvault:{address}", True)
+                            return True
+
+                        # B. Jika akun ini adalah executable smart contract
+                        if val_owner.get("executable"):
+                            self.cache.set(f"ammvault:{address}", True)
+                            return True
+
+                        # C. Verifikasi PDA/AMM Pool:
+                        # Akun manusia biasa: owner_prog == "11111111111111111111111111111111"
+                        # AMM Pool (Raydium, Meteora, PumpSwap, Orca, Phoenix, Moonshot, dll):
+                        # owner_prog adalah program AMM itu sendiri (bukan System Program).
+                        if owner_prog and owner_prog != "11111111111111111111111111111111":
                             self.cache.set(f"ammvault:{address}", True)
                             return True
             except Exception:
@@ -1711,7 +1749,9 @@ class HitAndRunScanner:
 
             v_sol = float(msg.get("vSolInBondingCurve", 0) or 0)
             if v_sol > 0:
-                t.bonding_pct = min(100.0, (v_sol / 85.0) * 100.0)
+                # Di Pump.fun, v_sol dimulai dari virtual 30 SOL dan selesai di ~115 SOL (85 real SOL terisi)
+                real_sol = max(0.0, v_sol - 30.0) if v_sol >= 30.0 else v_sol
+                t.bonding_pct = min(100.0, (real_sol / 85.0) * 100.0)
                 t.sol_in_bonding_history.append((time.time(), v_sol))
                 t.liquidity_usd = max(t.liquidity_usd, v_sol * 160.0)
 
@@ -1841,10 +1881,14 @@ class HitAndRunScanner:
             try:
                 mints_discovered: List[str] = []
 
-                # 1. GeckoTerminal Solana New & Trending Pools (Raydium CPMM, CLMM, Meteora)
+                # 1. GeckoTerminal Solana New, Trending & Multi-DEX Pools (PumpSwap, Pump.fun, Raydium, Meteora)
                 urls = [
                     self.cfg.geckoterminal_new_pools_url,
                     self.cfg.geckoterminal_trending_pools_url,
+                    "https://api.geckoterminal.com/api/v2/networks/solana/dexes/pumpswap/pools",
+                    "https://api.geckoterminal.com/api/v2/networks/solana/dexes/pump-fun/pools",
+                    "https://api.geckoterminal.com/api/v2/networks/solana/dexes/raydium/pools",
+                    "https://api.geckoterminal.com/api/v2/networks/solana/dexes/meteora/pools",
                 ]
                 for url in urls:
                     try:
