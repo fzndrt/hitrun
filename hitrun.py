@@ -156,7 +156,7 @@ class Config:
     pumpfun_coin_url: str = "https://frontend-api-v3.pump.fun/coins/"
     rugcheck_url: str = "https://api.rugcheck.xyz/v1"
     jupiter_quote_url: str = "https://lite-api.jup.ag/swap/v1/quote"
-    holder_rpc_url: str = "https://rpc.magicblock.app/mainnet"
+    holder_rpc_url: str = "https://solana-rpc.publicnode.com"
     public_rpc_url: str = "https://solana-rpc.publicnode.com"
 
     worker_count: int = 24
@@ -364,6 +364,9 @@ KNOWN_DEX_PROGRAMS = {
     # Orca & Moonshot
     "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Orca Whirlpool
     "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG",  # Moonshot
+    # PumpSwap (Pump.fun new AMM Migration DEX)
+    "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",  # PumpSwap Program
+    "BSfD6SHZigAfDWSFRzkghngYKEdukHgdHxoUmVYgpx4C",  # PumpSwap Authority
 }
 
 class RpcClient:
@@ -386,12 +389,17 @@ class RpcClient:
             "method": "getAccountInfo",
             "params": [address, {"encoding": "jsonParsed", "commitment": "confirmed"}],
         }
-        async with self.sem:
-            try:
-                async with self.session.post(self.cfg.holder_rpc_url, json=payload) as resp:
-                    data = await resp.json()
-            except Exception:
-                data = {}
+        data = {}
+        for rpc_url in (self.cfg.public_rpc_url, self.cfg.holder_rpc_url):
+            async with self.sem:
+                try:
+                    async with self.session.post(rpc_url, json=payload, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("result", {}).get("value"):
+                                break
+                except Exception:
+                    continue
 
         value = (data.get("result") or {}).get("value")
         if not value:
@@ -409,6 +417,24 @@ class RpcClient:
         if token_owner in KNOWN_DEX_PROGRAMS:
             self.cache.set(f"ammvault:{address}", True)
             return True
+
+        # Cek jika pemilik token_owner adalah program DEX (seperti PumpSwap Pool)
+        if token_owner:
+            payload_owner = {
+                "jsonrpc": "2.0", "id": "1",
+                "method": "getAccountInfo",
+                "params": [token_owner, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+            }
+            try:
+                async with self.session.post(self.cfg.public_rpc_url, json=payload_owner, headers={"User-Agent": "Mozilla/5.0"}) as resp_owner:
+                    if resp_owner.status == 200:
+                        data_owner = await resp_owner.json()
+                        owner_prog = (data_owner.get("result") or {}).get("value", {}).get("owner", "")
+                        if owner_prog in KNOWN_DEX_PROGRAMS:
+                            self.cache.set(f"ammvault:{address}", True)
+                            return True
+            except Exception:
+                pass
 
         self.cache.set(f"ammvault:{address}", False)
         return False
@@ -1715,21 +1741,25 @@ class HitAndRunScanner:
             try:
                 mints_discovered: List[str] = []
 
-                # 1. Pemindaian Token Profiles Terbaru (Mendeteksi Koin Potensial dengan Tim/Komunitas/Sosial Aktif)
+                # 1. Pemindaian Token Profiles & Token Boosts Terbaru (DexScreener Trending / Boosted)
                 if getattr(self.cfg, "enable_token_profiles_discovery", True):
-                    try:
-                        url_profiles = "https://api.dexscreener.com/token-profiles/latest/v1"
-                        async with self.rpc.sem:
-                            async with self.rpc.session.get(url_profiles) as resp:
-                                if resp.status == 200:
-                                    profiles = await resp.json()
-                                    for item in (profiles or []):
-                                        if item.get("chainId") == "solana":
-                                            addr = item.get("tokenAddress")
-                                            if addr:
-                                                mints_discovered.append(addr)
-                    except Exception:
-                        pass
+                    for boost_url in (
+                        "https://api.dexscreener.com/token-boosts/latest/v1",
+                        "https://api.dexscreener.com/token-boosts/top/v1",
+                        "https://api.dexscreener.com/token-profiles/latest/v1",
+                    ):
+                        try:
+                            async with self.rpc.sem:
+                                async with self.rpc.session.get(boost_url) as resp:
+                                    if resp.status == 200:
+                                        items = await resp.json()
+                                        for item in (items or []):
+                                            if item.get("chainId") == "solana":
+                                                addr = item.get("tokenAddress")
+                                                if addr:
+                                                    mints_discovered.append(addr)
+                        except Exception:
+                            pass
 
                 # 2. Pemindaian Multi-DEX Search (Raydium, Meteora DLMM, Orca)
                 for q in self.cfg.discovery_queries:
@@ -2003,14 +2033,15 @@ class HitAndRunScanner:
             if w in unlinked_holders and w not in t.pool_vaults and w not in KNOWN_DEX_PROGRAMS
         }
 
-        # Cek on-chain jika akun top 1 masih memegang > 20% pada koin DEX
+        # Cek on-chain jika akun top holder melebihi batas aman (verifikasi apakah akun tersebut sebenarnya adalah LP Vault AMM Raydium / Meteora / PumpSwap)
         sorted_individuals = sorted(individual_holders.items(), key=lambda x: x[1], reverse=True)
-        if sorted_individuals and sorted_individuals[0][1] > 20.0 and t.is_migrated:
-            top_cand = sorted_individuals[0][0]
-            if await self.rpc.check_is_amm_vault(top_cand, t.mint):
-                t.pool_vaults.add(top_cand)
-                individual_holders.pop(top_cand, None)
-                sorted_individuals = sorted(individual_holders.items(), key=lambda x: x[1], reverse=True)
+        for top_cand, top_pct in list(sorted_individuals[:4]):
+            if top_pct > self.cfg.max_top1_holder_pct:
+                if await self.rpc.check_is_amm_vault(top_cand, t.mint):
+                    t.pool_vaults.add(top_cand)
+                    individual_holders.pop(top_cand, None)
+
+        sorted_individuals = sorted(individual_holders.items(), key=lambda x: x[1], reverse=True)
 
         sorted_pcts = [p for _, p in sorted_individuals]
         top10_pct = sum(sorted_pcts[:10]) if sorted_pcts else 0.0
@@ -2323,6 +2354,42 @@ class HealthServer:
                 }
                 for s in self.scanner.signals[-30:]
             ])
+
+        @self.app.route("/check/<mint>")
+        def check_token(mint):
+            t = self.scanner.tokens.get(mint)
+            if not t:
+                return jsonify({
+                    "mint": mint,
+                    "status": "not_in_memory",
+                    "total_tracked": len(self.scanner.tokens),
+                    "message": "Token belum masuk antrean observasi bot"
+                }), 404
+
+            top1_holder = max(t.holders.values()) if t.holders else 0.0
+            return jsonify({
+                "mint": mint,
+                "name": t.name,
+                "symbol": t.symbol,
+                "dex_id": t.dex_id,
+                "source": t.source,
+                "price": t.price,
+                "market_cap": t.market_cap_usd,
+                "liquidity_usd": t.liquidity_usd,
+                "bonding_pct": t.bonding_pct,
+                "scored": t.scored,
+                "signal_emitted": t.signal_emitted,
+                "rescan_count": t.rescan_count,
+                "top1_holder_pct": round(top1_holder, 2),
+                "dev_holding_pct": round(t.dev_holding_pct, 2),
+                "unlinked_holders": t.unlinked_holders_count,
+                "unlinked_buyers": t.unlinked_buyers_count,
+                "organic_buys_count": t.organic_buys_count,
+                "organic_volume_buys_sol": round(t.organic_volume_buys_sol, 2),
+                "is_wash_trading": t.is_wash_trading,
+                "wash_flags": t.wash_flags,
+                "dev_linked_holding_pct": round(t.dev_linked_holding_pct, 2),
+            })
 
     def run(self, port: int):
         self.app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
