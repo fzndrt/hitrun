@@ -42,26 +42,29 @@ class Config:
     min_age_sec: int = 2
     enable_rescan: bool = True
     rescan_delay_sec: int = 20
-    max_rescan_count: int = 50                  # Mampu memantau token hingga 3-4 jam
-    max_rescan_age_sec: int = 14400             # 4 jam max umur koin untuk menangkap runner 1 jam pasca launch
+    max_rescan_count: int = 120                 # Mampu memantau token hingga 12 jam
+    max_rescan_age_sec: int = 43200             # 12 jam max umur koin untuk menangkap multi-hour runners
 
-    # --- Momentum & Filter Harga (Masuk di Awal Pompa) ---
-    max_price_pump_5m_pct: float = 120.0
-    min_price_pump_5m_pct: float = 3.0
+    # --- Momentum & Filter Harga (Masuk di Awal Pompa - Anti Pucuk / Anti Exhaustion) ---
+    max_price_pump_5m_pct: float = 65.0         # Anti-Pucuk: Max +65% di 5m (jangan beli di wick hijau tertinggi!)
+    min_price_pump_5m_pct: float = 1.5          # Titik Masuk: Wajib mulai naik minimal +1.5%
+    max_price_pump_1h_pct: float = 180.0        # Anti-Pucuk 1 Jam: Hindari koin yang sudah terbang 5x-10x
+    min_liquidity_to_mcap_ratio: float = 0.035  # Minimal rasio kolam vs MCap 3.5% (Anti Fake MCap)
     min_buy_volume_ratio: float = 0.60          # Wajib pembeli dominan kuat (>=60%)
 
     # --- Filter Kurva Bonding (Pump.fun) ---
     min_bonding_pct: float = 10.0               # Wajib sudah lepas landas (>=10% bukan koin mati)
     max_bonding_pct: float = 75.0               # Masih punya ruang pump sebelum top
 
-    # --- Filter DEX Pool (Meteora DLMM / Raydium / Post-Migrate / 1-4 Hour Runners) ---
+    # --- Filter DEX Pool (Meteora DLMM / Raydium / PumpSwap / 0 - 12 Hour Runners) ---
     enable_dex_pool_evaluation: bool = True
     enable_dexscreener_discovery: bool = True   # Pencarian otomatis likuiditas DEX multi-platform
     enable_token_profiles_discovery: bool = True # Pemindaian token profil DexScreener terbaru
-    min_market_cap_usd: float = 20_000          # Min $20,000 MCap titik infleksi breakout
-    max_market_cap_usd: float = 3_500_000       # Hingga $3.5M MCap untuk runner breakout
-    max_pool_age_minutes: int = 240             # Hingga 4 jam (menangkap koin 1-3 jam pasca launch)
-    min_pool_liquidity_usd: float = 7_000       # Min $7,000 likuiditas asli
+    min_market_cap_usd: float = 15_000          # Min $15,000 MCap titik infleksi breakout
+    max_market_cap_usd: float = 5_000_000       # Hingga $5M MCap untuk runner rally 12 jam
+    max_pool_age_minutes: int = 720             # Hingga 12 jam (720 menit) - menangkap koin konsolidasi & rally
+    min_pool_liquidity_usd: float = 5_000       # Min $5,000 likuiditas asli (akomodasi early liquidity)
+    require_spark_ignition_for_runners: bool = True # Untuk koin > 1 jam: wajib ada percikan breakout baru di 5m
 
     # --- KEAMANAN ANTI-JEBAKAN DEVELOPER (NON-NEGOTIABLE) ---
     require_mint_authority_revoked: bool = True
@@ -74,8 +77,8 @@ class Config:
     max_creator_rugpull_count: int = 0
 
     # --- 100X RUNNER DNA: KONSENTRASI SANGAT TERSEBAR (ZERO MONOPOLY) ---
-    max_top10_holder_pct: float = 28.0          # Top 10 akumulasi max 28% (desentralisasi ekstrem)
-    max_top1_holder_pct: float = 6.0            # Top 1 holder di luar pool max 6%
+    max_top10_holder_pct: float = 33.0          # Top 10 akumulasi max 33% (toleran tapi tetap terdesentralisasi)
+    max_top1_holder_pct: float = 8.0            # Top 1 holder di luar pool max 8.0% (akomodasi sniper awal ~7%)
     max_dev_holding_pct: float = 3.5            # Dev holding max 3.5% (Dev serakah langsung ditolak!)
     max_dev_sell_pct: float = 100.0             # Dev dump awal justru bagus (CTO pattern) asalkan holding <= 3.5%
     max_rugcheck_score: float = 50.0            # Maksimal skor risiko RugCheck (makin kecil makin aman)
@@ -164,10 +167,19 @@ class Config:
     cache_ttl_pool_sec: int = 15
     discovery_interval_sec: int = 15
 
+    # --- Pipeline GeckoTerminal & Raydium New Pools (Deteksi Koin Non-Pump.fun) ---
+    enable_geckoterminal_discovery: bool = True
+    geckoterminal_new_pools_url: str = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
+    geckoterminal_trending_pools_url: str = "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools"
+    enable_raydium_pools_discovery: bool = True
+    raydium_pools_url: str = "https://api-v3.raydium.io/pools/info/list?poolType=all&poolSortField=default&sortType=desc&pageSize=50&page=1"
+    geckoterminal_interval_sec: int = 15
+
     discovery_queries: Tuple[str, ...] = (
         "SOL", "PUMP", "RAY", "METEORA", "USDC",
         "AI", "TRUMP", "DOGE", "PEPE", "CAT",
         "BONK", "WIF", "MEME", "SPEC", "MOON",
+        "OWL", "ARMY", "SHIB", "BULL", "CHILL",
     )
     discovery_max_per_query: int = 40
 
@@ -582,19 +594,27 @@ class RpcClient:
         twitter = any("twitter" in s.get("type", "").lower() or "x.com" in s.get("url", "").lower() for s in socials)
         telegram = any("telegram" in s.get("type", "").lower() or "t.me" in s.get("url", "").lower() for s in socials)
 
+        quote_token = best.get("quoteToken", {}) or {}
+
         result = {
             "name": base_token.get("name", "Unknown"),
             "symbol": base_token.get("symbol", "TOKEN"),
             "dex_id": best.get("dexId", "unknown"),
             "pool_address": best.get("pairAddress", ""),
+            "quote_symbol": quote_token.get("symbol", "SOL"),
+            "quote_address": quote_token.get("address", ""),
             "market_cap": float(best.get("marketCap", 0) or best.get("fdv", 0) or 0),
             "liquidity_usd": float(best.get("liquidity", {}).get("usd", 0) or 0),
             "price": float(best.get("priceUsd", 0) or 0),
             "created_at": float(best.get("pairCreatedAt", 0) or 0) / 1000.0,
             "buys_m5": int(txns.get("m5", {}).get("buys", 0) or 0),
             "sells_m5": int(txns.get("m5", {}).get("sells", 0) or 0),
+            "buys_h1": int(txns.get("h1", {}).get("buys", 0) or 0),
+            "sells_h1": int(txns.get("h1", {}).get("sells", 0) or 0),
             "vol_m5": float(vol.get("m5", 0) or 0),
+            "vol_h1": float(vol.get("h1", 0) or 0),
             "price_change_m5": float(price_change.get("m5", 0) or 0),
+            "price_change_h1": float(price_change.get("h1", 0) or 0),
             "has_twitter": twitter,
             "has_telegram": telegram,
             "has_website": len(websites) > 0,
@@ -1620,6 +1640,80 @@ class HitAndRunScanner:
                 pass
             await asyncio.sleep(self.cfg.discovery_interval_sec)
 
+    async def geckoterminal_discovery_loop(self):
+        if not getattr(self.cfg, "enable_geckoterminal_discovery", True):
+            return
+        print("[discovery] GeckoTerminal & Raydium New Pools discovery started")
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        base_skips = {
+            "So11111111111111111111111111111111111111112",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+            "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+        }
+
+        while self.running:
+            try:
+                mints_discovered: List[str] = []
+
+                # 1. GeckoTerminal Solana New & Trending Pools (Raydium CPMM, CLMM, Meteora)
+                urls = [
+                    self.cfg.geckoterminal_new_pools_url,
+                    self.cfg.geckoterminal_trending_pools_url,
+                ]
+                for url in urls:
+                    try:
+                        async with self.rpc.sem:
+                            async with self.rpc.session.get(url, headers=headers) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    pools = data.get("data", []) or []
+                                    for p in pools:
+                                        rel = p.get("relationships", {})
+                                        base_data = rel.get("base_token", {}).get("data", {})
+                                        token_id = base_data.get("id", "")
+                                        if token_id.startswith("solana_"):
+                                            mint = token_id.replace("solana_", "")
+                                            if mint and mint not in base_skips:
+                                                mints_discovered.append(mint)
+                    except Exception:
+                        pass
+
+                # 2. Raydium API New Pools (Mendeteksi langsung pool Raydium CPMM/CLMM baru)
+                if getattr(self.cfg, "enable_raydium_pools_discovery", True):
+                    try:
+                        async with self.rpc.sem:
+                            async with self.rpc.session.get(self.cfg.raydium_pools_url, headers=headers) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    ray_pools = data.get("data", {}).get("data", []) or []
+                                    for rp in ray_pools[:35]:
+                                        mint_a = rp.get("mintA", {}).get("address", "")
+                                        mint_b = rp.get("mintB", {}).get("address", "")
+                                        for m in (mint_a, mint_b):
+                                            if m and m not in base_skips:
+                                                mints_discovered.append(m)
+                    except Exception:
+                        pass
+
+                mints_discovered = list(dict.fromkeys(mints_discovered))
+                for mint in mints_discovered:
+                    t = self.tokens.get(mint)
+                    if not t:
+                        self.tokens[mint] = TokenState(
+                            mint=mint,
+                            creator="",
+                            source="geckoterminal",
+                            created_at=time.time(),
+                        )
+                        await self.eval_queue.put(mint)
+                    elif not t.signal_emitted and not t.scored:
+                        await self.eval_queue.put(mint)
+
+            except Exception:
+                pass
+            await asyncio.sleep(self.cfg.geckoterminal_interval_sec)
+
     async def worker(self, worker_id: int):
         while self.running:
             try:
@@ -1804,8 +1898,9 @@ class HitAndRunScanner:
                 red_flags.append(f"insufficient_buy_volume:{t.volume_buys:.1f}SOL<{self.cfg.min_volume_buys_sol}SOL")
         else:
             buys_m5 = pool_data.get("buys_m5", 0) if pool_data else 0
-            if buys_m5 < self.cfg.min_organic_buys_m5:
-                red_flags.append(f"dead_dex_buys_m5:{buys_m5}<{self.cfg.min_organic_buys_m5}")
+            buys_h1 = pool_data.get("buys_h1", 0) if pool_data else 0
+            if buys_m5 < self.cfg.min_organic_buys_m5 and buys_h1 < 30:
+                red_flags.append(f"dead_dex_buys:{buys_m5}m5,{buys_h1}h1")
 
         # --- JEBAKAN CABAL, AFILIASI DEV, & FAKE VOLUME ---
         if is_cabal:
@@ -1836,6 +1931,41 @@ class HitAndRunScanner:
         if t.is_migrated and self.cfg.require_lp_locked and not locked:
             if t.liquidity_usd < self.cfg.min_pool_liquidity_usd:
                 red_flags.append("lp_not_locked")
+
+        # ========================================================
+        # ANTI-PUCUK & ANTI-EXHAUSTION (HIT & RUN SWEET SPOT)
+        # ========================================================
+        if pool_data:
+            pc_m5 = float(pool_data.get("price_change_m5", 0.0) or 0.0)
+            pc_h1 = float(pool_data.get("price_change_h1", 0.0) or 0.0)
+            buys_m5_cnt = int(pool_data.get("buys_m5", 0) or 0)
+            sells_m5_cnt = int(pool_data.get("sells_m5", 0) or 0)
+
+            # 1. Anti-Pucuk 5 Menit: Jangan beli koin yang sudah meledak parabolik di wick tertinggi
+            if pc_m5 > self.cfg.max_price_pump_5m_pct:
+                red_flags.append(f"pump_overextended_m5:{pc_m5:+.1f}%>{self.cfg.max_price_pump_5m_pct}%")
+
+            # 2. Anti-Pucuk 1 Jam: Jangan beli koin yang 1 jam terakhir sudah naik gila-gilaan (exit liquidity)
+            if pc_h1 > self.cfg.max_price_pump_1h_pct:
+                red_flags.append(f"pump_overextended_h1:{pc_h1:+.1f}%>{self.cfg.max_price_pump_1h_pct}%")
+
+            # 3. Anti-Fake MC: Rasio Likuiditas vs MCap wajib memadai (min 3.5%)
+            if t.market_cap_usd > 0 and t.liquidity_usd > 0:
+                liq_ratio = t.liquidity_usd / t.market_cap_usd
+                if liq_ratio < self.cfg.min_liquidity_to_mcap_ratio:
+                    red_flags.append(f"thin_liquidity_trap:{liq_ratio:.1%}<{self.cfg.min_liquidity_to_mcap_ratio:.1%}")
+
+            # 4. Anti-Falling Knife (Pisau Jatuh): Koin tidak boleh sedang dibuang deras di 5m
+            if pc_m5 < -8.0:
+                red_flags.append(f"falling_knife_5m:{pc_m5:.1f}%")
+
+            # 5. Percikan Ignition untuk Koin Runner (> 1 Jam s/d 12 Jam):
+            # Koin multi-hour HANYA dimasuki ketika ada percikan akumulasi baru di 5m terakhir (mulai naik)!
+            pool_age_mins = t.pool_age_minutes
+            if pool_age_mins > 60.0 and getattr(self.cfg, "require_spark_ignition_for_runners", True):
+                has_spark = (buys_m5_cnt >= 8) and (buys_m5_cnt >= sells_m5_cnt * 1.15) and (pc_m5 >= 0.5)
+                if not has_spark:
+                    red_flags.append(f"waiting_breakout_spark:buys={buys_m5_cnt},sells={sells_m5_cnt},pc5m={pc_m5:+.1f}%")
 
         # Hitung skor momentum
         score, phase, reasons, score_flags = self.scorer.score_token(t)
@@ -1967,6 +2097,7 @@ class HitAndRunScanner:
         tasks = [
             asyncio.create_task(self.pumpportal_listener()),
             asyncio.create_task(self.dexscreener_discovery_loop()),
+            asyncio.create_task(self.geckoterminal_discovery_loop()),
             asyncio.create_task(self.signal_consumer()),
             asyncio.create_task(self.monitor_loop()),
             asyncio.create_task(self.rescan_loop()),
