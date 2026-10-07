@@ -78,7 +78,7 @@ class Config:
 
     # --- 100X RUNNER DNA: KONSENTRASI SANGAT TERSEBAR (ZERO MONOPOLY) ---
     max_top10_holder_pct: float = 33.0          # Top 10 akumulasi max 33% (toleran tapi tetap terdesentralisasi)
-    max_top1_holder_pct: float = 8.0            # Top 1 holder di luar pool max 8.0% (akomodasi sniper awal ~7%)
+    max_top1_holder_pct: float = 10.0           # Top 1 holder di luar pool max 10.0% (akomodasi sniper awal ~8.5%)
     max_dev_holding_pct: float = 3.5            # Dev holding max 3.5% (Dev serakah langsung ditolak!)
     max_dev_sell_pct: float = 100.0             # Dev dump awal justru bagus (CTO pattern) asalkan holding <= 3.5%
     max_rugcheck_score: float = 50.0            # Maksimal skor risiko RugCheck (makin kecil makin aman)
@@ -2122,6 +2122,19 @@ class HitAndRunScanner:
             red_flags.append(f"insufficient_unlinked_holders:{t.unlinked_holders_count}<{min_unlinked_h}")
 
         if not t.is_migrated:
+            # Fallback 1: Jika volume websocket belum tercatat, ambil dari data pool / DexScreener
+            if t.volume_buys <= 0 and pool_data:
+                t.volume_buys = pool_data.get("vol_m5", 0.0) / 160.0
+                t.unlinked_buyers_count = max(t.unlinked_buyers_count, pool_data.get("buys_m5", 0))
+
+            # Fallback 2: Jika koin pump.fun sudah naik bonding curve > 10%, gunakan akumulasi real SOL di bonding
+            if t.volume_buys < self.cfg.min_volume_buys_sol and t.bonding_pct >= 10.0:
+                t.volume_buys = max(t.volume_buys, (t.bonding_pct / 100.0) * 85.0)
+
+            # Fallback 3: Estimasi pembeli dari jumlah holder organik on-chain
+            if t.unlinked_buyers_count < self.cfg.min_unlinked_buyers_count and len(holders) >= self.cfg.min_holders_count:
+                t.unlinked_buyers_count = max(t.unlinked_buyers_count, len(unlinked_holders))
+
             if t.unlinked_buyers_count < self.cfg.min_unlinked_buyers_count:
                 red_flags.append(f"insufficient_unlinked_buyers:{t.unlinked_buyers_count}<{self.cfg.min_unlinked_buyers_count}")
             if t.volume_buys < self.cfg.min_volume_buys_sol:
@@ -2334,6 +2347,38 @@ class HitAndRunScanner:
                 pass
             await asyncio.sleep(2.0)
 
+    async def housekeeping_loop(self):
+        """
+        Pembersihan memori otomatis untuk mencegah Out-Of-Memory (OOM) di Render (Batas RAM 512 MB).
+        - Membersihkan cache RPC kadaluarsa
+        - Memangkas token tidak aktif berumur > 2 jam yang tidak memiliki posisi terbuka
+        - Membersihkan buyers_buffer
+        - Memanggil gc.collect()
+        """
+        import gc
+        while self.running:
+            try:
+                await asyncio.sleep(180)  # Setiap 3 menit
+                now = time.time()
+                
+                # 1. Bersihkan TimedCache
+                self.cache.cleanup()
+                
+                # 2. Pangkas token tidak aktif berumur > 2 jam
+                active_pos_mints = set(self.positions.positions.keys())
+                dead_mints = [
+                    mint for mint, t in self.tokens.items()
+                    if mint not in active_pos_mints and (now - t.created_at > 7200) and (t.scored or t.rescan_count >= self.cfg.max_rescan_count)
+                ]
+                for mint in dead_mints:
+                    self.tokens.pop(mint, None)
+                    self.buyers_buffer.pop(mint, None)
+                
+                # 3. Paksa garbage collection agar RAM Render tetap stabil di bawah 100MB
+                gc.collect()
+            except Exception:
+                pass
+
     async def run(self):
         await self.rpc.start()
         await self.telegram.start()
@@ -2345,6 +2390,7 @@ class HitAndRunScanner:
             asyncio.create_task(self.signal_consumer()),
             asyncio.create_task(self.monitor_loop()),
             asyncio.create_task(self.rescan_loop()),
+            asyncio.create_task(self.housekeeping_loop()),
         ]
         for i in range(self.cfg.worker_count):
             tasks.append(asyncio.create_task(self.worker(i)))
