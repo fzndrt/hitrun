@@ -42,8 +42,8 @@ class Config:
     min_age_sec: int = 2
     enable_rescan: bool = True
     rescan_delay_sec: int = 20
-    max_rescan_count: int = 120                 # Mampu memantau token hingga 12 jam
-    max_rescan_age_sec: int = 43200             # 12 jam max umur koin untuk menangkap multi-hour runners
+    max_rescan_count: int = 240                 # Mampu memantau token hingga 24 jam
+    max_rescan_age_sec: int = 86400             # 24 jam max umur koin untuk menangkap 24h runners
 
     # --- Momentum & Filter Harga (Masuk di Awal Pompa - Anti Pucuk / Anti Exhaustion) ---
     max_price_pump_5m_pct: float = 65.0         # Anti-Pucuk: Max +65% di 5m (jangan beli di wick hijau tertinggi!)
@@ -56,13 +56,13 @@ class Config:
     min_bonding_pct: float = 10.0               # Wajib sudah lepas landas (>=10% bukan koin mati)
     max_bonding_pct: float = 75.0               # Masih punya ruang pump sebelum top
 
-    # --- Filter DEX Pool (Meteora DLMM / Raydium / PumpSwap / 0 - 12 Hour Runners) ---
+    # --- Filter DEX Pool (Meteora DLMM / Raydium / PumpSwap / 0 - 24 Hour Runners) ---
     enable_dex_pool_evaluation: bool = True
     enable_dexscreener_discovery: bool = True   # Pencarian otomatis likuiditas DEX multi-platform
     enable_token_profiles_discovery: bool = True # Pemindaian token profil DexScreener terbaru
     min_market_cap_usd: float = 15_000          # Min $15,000 MCap titik infleksi breakout
-    max_market_cap_usd: float = 5_000_000       # Hingga $5M MCap untuk runner rally 12 jam
-    max_pool_age_minutes: int = 720             # Hingga 12 jam (720 menit) - menangkap koin konsolidasi & rally
+    max_market_cap_usd: float = 600_000         # Max $600,000 MCap (Sweet spot awal, menghindari beli saat sudah terbang tinggi)
+    max_pool_age_minutes: int = 1440            # Hingga 24 jam (1440 menit) - menangkap koin konsolidasi & rally 24 jam
     min_pool_liquidity_usd: float = 5_000       # Min $5,000 likuiditas asli (akomodasi early liquidity)
     require_spark_ignition_for_runners: bool = True # Untuk koin > 1 jam: wajib ada percikan breakout baru di 5m
 
@@ -84,18 +84,18 @@ class Config:
     max_rugcheck_score: float = 50.0            # Maksimal skor risiko RugCheck (makin kecil makin aman)
 
     # --- Syarat Mutlak Koin Hidup (Retail Army - Pasukan Pembeli Unik) ---
-    min_holders_count: int = 16                 # Wajib minimal 16 pemegang asli
-    min_dex_holders_count: int = 22             # Di DEX pool wajib minimal 22 pemegang asli
-    min_unique_buyers_count: int = 8            # Minimal 8 pembeli unik berbeda
+    min_holders_count: int = 18                 # Wajib minimal 18 pemegang asli
+    min_dex_holders_count: int = 25             # Di DEX pool wajib minimal 25 pemegang asli
+    min_unique_buyers_count: int = 10           # Wajib minimal 10 pembeli unik berbeda
     min_organic_buys_m5: int = 10               # Minimal 10 transaksi beli di 5 menit terakhir
     min_volume_buys_sol: float = 7.0            # Minimal 7 SOL akumulasi pembelian nyata
 
     # --- ANTI-DEV LINKAGE & INDEPENDENT BUYER VERIFICATION ---
     enable_dev_linkage_check: bool = True
     max_dev_linked_holding_pct: float = 4.5     # Akumulasi holding dev + afiliasi max 4.5%
-    min_unlinked_holders_count: int = 14        # Wajib minimal 14 holder yang 100% independen dari dev
-    min_unlinked_dex_holders_count: int = 18    # Wajib minimal 18 holder independen di DEX pool
-    min_unlinked_buyers_count: int = 6          # Wajib minimal 6 pembeli unik independen (Retail Army)
+    min_unlinked_holders_count: int = 16        # Wajib minimal 16 holder yang 100% independen dari dev
+    min_unlinked_dex_holders_count: int = 20    # Wajib minimal 20 holder independen di DEX pool
+    min_unlinked_buyers_count: int = 8          # Wajib minimal 8 pembeli unik independen (Retail Army)
 
     # ========================================================
     # ANTI-CABAL SYBIL MULTI-WALLET (Solusi Developer Pecah Dompet)
@@ -186,11 +186,10 @@ class Config:
     geckoterminal_interval_sec: int = 15
 
     discovery_queries: Tuple[str, ...] = (
-        "pumpswap", "pump", "sol", "raydium", "meteora",
-        "SOL", "PUMP", "RAY", "METEORA", "USDC",
-        "AI", "TRUMP", "DOGE", "PEPE", "CAT",
-        "BONK", "WIF", "MEME", "SPEC", "MOON",
-        "OWL", "ARMY", "SHIB", "BULL", "CHILL",
+        "So11111111111111111111111111111111111111112",  # WSOL Pair (Mencakup 99.9% token Solana tanpa filter nama/inisial)
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC Pair
+        "pumpswap", "pump", "solana", "meteora", "raydium", "orca", "cpmm",
+        "dlmm", "clmm", "whirlpool", "dex", "pool",
     )
     discovery_max_per_query: int = 40
 
@@ -1142,6 +1141,14 @@ class DevLinkageAndSybilDetector:
                 dev_linked_wallets.add(w)
                 continue
 
+            # Kasus C: Trace Rekursif 2-Hop (Pecah Dompet via Sub-Disperser: Creator -> Disperser -> Child)
+            if creator and w_funder and w_funder not in dev_linked_wallets and w_funder not in self.KNOWN_EXCHANGES:
+                grand_funder = await self.find_funder(w_funder, window_start, window_end)
+                if grand_funder and (grand_funder == creator or (creator_funder and grand_funder == creator_funder and grand_funder not in self.KNOWN_EXCHANGES)):
+                    dev_linked_wallets.add(w)
+                    dev_linked_wallets.add(w_funder)
+                    continue
+
         # Cek direct transfer cepat untuk top 5 holder
         if creator:
             direct_checks = await asyncio.gather(
@@ -1587,47 +1594,84 @@ class TelegramAlerter:
             await self.session.close()
 
     async def send_signal_alert(self, s: Signal, t: TokenState):
-        emoji = "🔥" if s.phase == "PRE_PARABOLIC_IGNITION" else ("🚀" if s.score >= 75 else "⚡")
+        emoji = "🔥" if s.phase == "PRE_PARABOLIC_IGNITION" else ("🚀" if s.score >= 85 else "⚡")
         if s.phase == "PRE_PARABOLIC_IGNITION":
-            phase_label = "🔥 EARLY-ACCUMULATION IGNITION"
+            phase_label = "🔥 EARLY IGNITION (PRE-PARABOLIC)"
         elif s.phase == "dex_pool":
-            phase_label = "MOMENTUM DEX POOL"
+            phase_label = "MOMENTUM DEX POOL BREAKOUT"
         else:
-            phase_label = "BONDING SWEETSPOT"
+            phase_label = "BONDING ACCUMULATION"
+
+        age_mins = max(0.1, t.pool_age_minutes if t.pool_age_minutes > 0 else (time.time() - t.created_at) / 60.0)
+        age_str = f"{age_mins:.0f} Menit" if age_mins < 60 else f"{age_mins / 60.0:.1f} Jam"
+
+        total_tx = max(1, t.buys_count + t.sells_count)
+        buy_ratio = (t.buys_count / total_tx) * 100.0
+        buy_mult = (t.buys_count / max(1, t.sells_count))
+        unique_buyers = max(len(t.unique_buyers), len(t.organic_unique_buyers), t.unlinked_buyers_count, 1)
+
+        # Hitung Top 1 Holder di luar kolam likuiditas
+        individual_holders = {
+            w: p for w, p in t.holders.items()
+            if w not in t.pool_vaults and w not in KNOWN_DEX_PROGRAMS
+        }
+        sorted_p = sorted(individual_holders.values(), reverse=True)
+        top1_pct = sorted_p[0] if sorted_p else 0.0
+        top10_pct = sum(sorted_p[:10]) if sorted_p else 0.0
+
+        liq_ratio = (s.liquidity / max(1.0, s.market_cap)) * 100.0
+
+        dev_status = "EXIT / CTO (0.0%) ✅" if t.dev_holding_pct <= 0.1 else f"{t.dev_holding_pct:.1f}% (Aman &le; 3.5%)"
+        sybil_status = f"{len(t.dev_linked_wallets)} Dompet ({t.dev_linked_holding_pct:.1f}%)" if t.dev_linked_wallets else "0 Dompet (Terdesentralisasi Murni) ✅"
+
+        # Prediksi Target Hit & Run (Proyeksi Keuntungan)
+        tp1 = s.entry_price * 1.80  # +80%
+        tp2 = s.entry_price * 3.00  # +200% (3x)
+        sl = s.entry_price * 0.78   # -22%
+
+        reasons_text = "\n".join(f"  • {r}" for r in s.reasons[:5])
 
         text = (
-            f"{emoji} <b>[HIT-AND-RUN] GEM SIGNAL ({phase_label})</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Token:</b> {t.name} (<b>${t.symbol}</b>)\n"
-            f"<b>Mint:</b> <code>{s.mint}</code>\n"
-            f"<b>Source:</b> {s.source} ({t.dex_id or 'DEX'})\n"
-            f"<b>Skor Konvinsi:</b> <code>{s.score}/100</code>\n"
-            f"<b>Entry Price:</b> <code>${s.entry_price:.8f}</code>\n"
-            f"<b>Market Cap:</b> <code>${s.market_cap:,.0f}</code>\n"
-            f"<b>Liquidity:</b> <code>${s.liquidity:,.0f}</code>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>🛡️ Audit Akumulasi & Anti-Jebakan:</b>\n"
-            f"  • Inflow Organik: <code>{t.organic_volume_buys_sol:.1f} SOL ({len(t.organic_unique_buyers)} Pembeli Bersih)</code>\n"
-            f"  • Deployer Vanity: {'✅ Diabaikan (Block-0 Bundle)' if t.block0_vanity_volume_sol > 0 else '✅ 0 Vanity'}\n"
-            f"  • Keterkaitan Dev: {'✅ 0 (100% Unik & Independen)' if not t.dev_linked_holding_pct else f'⚠️ {len(t.dev_linked_wallets)} Dompet Dev ({t.dev_linked_holding_pct:.1f}%)'}\n"
-            f"  • Pemegang Independen: <code>{t.unlinked_holders_count} Wallets</code>\n"
-            f"  • Pembeli Unik: <code>{t.unlinked_buyers_count} Wallets</code>\n"
-            f"  • Anti-Wash Volume: {'✅ Organik' if not t.is_wash_trading else '❌ Fake Volume'}\n"
-            f"  • Mint/Freeze: {'✅ Revoked' if not (t.mint_authority_active or t.freeze_authority_active) else '❌ Aktif'}\n"
-            f"  • LP Status: {'✅ Terkunci/Aman' if t.lp_locked else '⚠️ Open Vault'}\n"
-            f"  • Dev Holdings: <code>{t.dev_holding_pct:.1f}%</code>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>🎯 Rencana Hit-and-Run:</b>\n"
-            f"  • Stop Loss: -22% (Cut Loss Ketat)\n"
-            f"  • TP 1: +80% (Ambil Modal 50%)\n"
-            f"  • TP 2: +200% (Amankan Profit 25%)\n"
-            f"  • Trailing Stop: 18% (Kawal Moonbag)\n"
-            f"  • Time Stop: 60 Menit\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Alasan Lolos:</b>\n" +
-            "\n".join(f"  • {r}" for r in s.reasons[:5]) +
-            f"\n\n🔗 <a href='https://dexscreener.com/solana/{s.mint}'>[DexScreener]</a> · "
-            f"<a href='https://photon-sol.tinyastro.io/en/r/@alpha/{s.mint}'>[Photon]</a>"
+            f"{emoji} <b>[HITRUN-V12] EARLY GEM SNIPER ALERT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 <b>Token:</b> {t.name} (<b>${t.symbol}</b>)\n"
+            f"🔑 <b>CA:</b> <code>{s.mint}</code> <i>(Salin Cepat)</i>\n"
+            f"💎 <b>DEX / Status:</b> <code>{(t.dex_id or 'DEX').upper()}</code> · <b>{phase_label}</b>\n"
+            f"🎯 <b>Skor Keyakinan:</b> <code>{s.score}/100 [GRADE-A RUNNER DNA]</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 <b>METRIK INFLEKSI HARGA:</b>\n"
+            f"  • Entry Price: <code>${s.entry_price:.8f}</code>\n"
+            f"  • Market Cap: <code>${s.market_cap:,.0f}</code> <i>(Early Zone &lt; $600K)</i>\n"
+            f"  • Likuiditas Pool: <code>${s.liquidity:,.0f}</code> <i>(Rasio: {liq_ratio:.1f}%)</i>\n"
+            f"  • Usia Koin / Pool: <code>{age_str}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👥 <b>ANALISIS PASUKAN PEMBELI (BUYER ARMY):</b>\n"
+            f"  • Rasio Pembeli (Buy Ratio): <code>{buy_ratio:.1f}% BUY ({buy_mult:.2f}x Penjual)</code>\n"
+            f"  • Pembeli Unik (Unique Buyers): <code>{unique_buyers} Dompet Berbeda</code>\n"
+            f"  • Total Pemegang (Holders): <code>{len(t.holders)} Dompet On-Chain</code>\n"
+            f"  • Pemegang Terbesar (Top 1 Non-Pool): <code>{top1_pct:.2f}% (Toleransi &le; 10%)</code>\n"
+            f"  • Konsentrasi Top 10: <code>{top10_pct:.1f}% (Terdistribusi Sehat)</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🛡️ <b>FORENSIK DEVELOPER & CABAL:</b>\n"
+            f"  • Status Developer: <code>{dev_status}</code>\n"
+            f"  • Dompet Pecahan Dev (Sybil Tree): <code>{sybil_status}</code>\n"
+            f"  • Status Kontrak: <code>Mint: {'Revoked ✅' if not t.mint_authority_active else 'Aktif ❌'} | Freeze: {'Revoked ✅' if not t.freeze_authority_active else 'Aktif ❌'}</code>\n"
+            f"  • Skor Risiko RugCheck: <code>{t.rug_score:.0f}/100 (Aman)</code>\n"
+            f"  • Kualitas Volume: <code>{'✅ Organik Murni' if not t.is_wash_trading else '⚠️ Fake Volume'}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📈 <b>PREDIKSI TARGET PROFIT (HIT &amp; RUN):</b>\n"
+            f"  • 🎯 TP 1 (+80%): <code>${tp1:.8f}</code> <i>(Tarik Modal 50% - Free Ride)</i>\n"
+            f"  • 🚀 TP 2 (+200% / 3x): <code>${tp2:.8f}</code> <i>(Kunci Cuan 25%)</i>\n"
+            f"  • 🛡️ Trailing Stop: <code>-18% dari High</code> (Kawal Moonbag)\n"
+            f"  • 🛑 Stop Loss: <code>-22% Ketat</code> (Anti Nyangkut)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 <b>Katalog Keunggulan On-Chain:</b>\n"
+            f"{reasons_text}\n\n"
+            f"⚡ <b>LINK EKSEKUSI TRADING CEPAT:</b>\n"
+            f"🔗 <a href='https://photon-sol.tinyastro.io/en/r/@alpha/{s.mint}'>[Photon SOL]</a> · "
+            f"<a href='https://bullx.io/terminal?chainId=1399811149&address={s.mint}'>[BullX]</a> · "
+            f"<a href='https://dexscreener.com/solana/{s.mint}'>[DexScreener]</a> · "
+            f"<a href='https://gmgn.ai/sol/token/{s.mint}'>[GMGN]</a>"
         )
         await self._send(text)
 
@@ -1830,13 +1874,13 @@ class HitAndRunScanner:
                                                 change_m5 >= 2.0
                                             )
 
-                                            # Jalur B: 1-4 Hour Runner Breakout (Seperti Knight Cat & Runner Konsolidasi Pasca 1 Jam)
+                                            # Jalur B: 1-24 Hour Runner Breakout (Konsolidasi & Rally Gelombang 2 & 3 seperti $Agency)
                                             is_hour_runner = (
                                                 liq_usd >= self.cfg.min_pool_liquidity_usd and
-                                                buys_h1 >= 30 and
-                                                buys_h1 >= (sells_h1 * 1.15) and
-                                                vol_h1 >= 6000 and
-                                                change_h1 >= 10.0 and
+                                                buys_h1 >= 25 and
+                                                buys_h1 >= (sells_h1 * 1.10) and
+                                                vol_h1 >= 5000 and
+                                                change_h1 >= 5.0 and
                                                 change_m5 >= -4.0  # Bukan sedang dump tajam
                                             )
 
@@ -2351,9 +2395,10 @@ class HitAndRunScanner:
         """
         Pembersihan memori otomatis untuk mencegah Out-Of-Memory (OOM) di Render (Batas RAM 512 MB).
         - Membersihkan cache RPC kadaluarsa
-        - Memangkas token tidak aktif berumur > 2 jam yang tidak memiliki posisi terbuka
+        - Memangkas token mati/scam berumur > 30 menit (likuiditas < $1K atau volume 0)
+        - Mempertahankan token runner potensial hingga 24 jam penuh (86,400 detik)
         - Membersihkan buyers_buffer
-        - Memanggil gc.collect()
+        - Memanggil gc.collect() untuk menjaga RAM stabil < 100MB
         """
         import gc
         while self.running:
@@ -2364,12 +2409,21 @@ class HitAndRunScanner:
                 # 1. Bersihkan TimedCache
                 self.cache.cleanup()
                 
-                # 2. Pangkas token tidak aktif berumur > 2 jam
+                # 2. Pangkas token cerdas:
+                # - Token mati/sampah (< $1000 liq atau < $5000 MC): buang cepat (30 menit)
+                # - Token runner sehat: pertahankan observasi hingga 24 jam (86400 detik)
                 active_pos_mints = set(self.positions.positions.keys())
-                dead_mints = [
-                    mint for mint, t in self.tokens.items()
-                    if mint not in active_pos_mints and (now - t.created_at > 7200) and (t.scored or t.rescan_count >= self.cfg.max_rescan_count)
-                ]
+                dead_mints = []
+                for mint, t in list(self.tokens.items()):
+                    if mint in active_pos_mints:
+                        continue
+                    age = now - t.created_at
+                    is_dead_trash = (t.liquidity_usd < 1000.0 or t.market_cap_usd < 5000.0) and age > 1800
+                    is_expired_runner = age > 86400 and (t.scored or t.rescan_count >= self.cfg.max_rescan_count)
+                    
+                    if is_dead_trash or is_expired_runner:
+                        dead_mints.append(mint)
+                
                 for mint in dead_mints:
                     self.tokens.pop(mint, None)
                     self.buyers_buffer.pop(mint, None)
@@ -2395,17 +2449,17 @@ class HitAndRunScanner:
         for i in range(self.cfg.worker_count):
             tasks.append(asyncio.create_task(self.worker(i)))
 
-        print(f"🚀 [HITRUN-V12] Anti-Cabal & Anti-Wash Online | Workers={self.cfg.worker_count}")
+        print(f"🚀 [HITRUN-V12] Anti-Cabal & Anti-Wash Online | MaxMC=$600K | Workers={self.cfg.worker_count}")
         try:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
         except asyncio.CancelledError:
             pass
         finally:
-            self.running = False
-            for t in tasks:
-                t.cancel()
-            await self.telegram.close()
-            await self.rpc.close()
+            if not self.running:
+                for t in tasks:
+                    t.cancel()
+                await self.telegram.close()
+                await self.rpc.close()
 
 
 # ============================================================
@@ -2417,6 +2471,19 @@ class HealthServer:
         self.scanner = scanner
         self.app = Flask(__name__)
         self._register_routes()
+
+    def _keepalive_worker(self, port: int):
+        """Self-ping loop internal setiap 2.5 menit untuk mencegah idle/sleep di container Render."""
+        time.sleep(15)
+        while True:
+            try:
+                time.sleep(150)
+                url = f"http://127.0.0.1:{port}/"
+                req = urllib.request.Request(url, headers={"User-Agent": "HitRunKeepalive/1.0"})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    resp.read()
+            except Exception:
+                pass
 
     def _register_routes(self):
         @self.app.route("/")
@@ -2482,11 +2549,12 @@ class HealthServer:
             })
 
     def run(self, port: int):
+        threading.Thread(target=self._keepalive_worker, args=(port,), daemon=True).start()
         self.app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
 
 # ============================================================
-# 12. ENTRY POINT
+# 12. ENTRY POINT (CONTINUOUS ALWAYS-ON ENGINE)
 # ============================================================
 
 async def main():
@@ -2496,16 +2564,28 @@ async def main():
     port = int(os.getenv("PORT", "10000"))
     health = HealthServer(scanner)
     threading.Thread(target=health.run, args=(port,), daemon=True).start()
-    print(f"[web] Health server listening on :{port}")
+    print(f"[web] Health server & internal keepalive listening on :{port}")
 
     def handle_shutdown(signum, frame):
-        print(f"[shutdown] Sinyal shutdown diterima...")
-        scanner.running = False
+        print(f"[shutdown] Sinyal OS ({signum}) diterima...")
+        if signum == signal.SIGINT:
+            scanner.running = False
 
-    signal.signal(signal.SIGTERM, handle_shutdown)
-    signal.signal(signal.SIGINT, handle_shutdown)
+    try:
+        signal.signal(signal.SIGTERM, handle_shutdown)
+        signal.signal(signal.SIGINT, handle_shutdown)
+    except Exception:
+        pass
 
-    await scanner.run()
+    # Mesin On Terus: Otomatis restart jika terjadi kendala jaringan/koneksi
+    while scanner.running:
+        try:
+            await scanner.run()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[engine] Scanner error: {e}. Auto-restarting engine in 3s...")
+            await asyncio.sleep(3.0)
 
 
 if __name__ == "__main__":
