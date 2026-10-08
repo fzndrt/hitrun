@@ -1762,6 +1762,7 @@ class HitAndRunScanner:
             # Jadwalkan rescan otomatis awal (T+35 detik) untuk memeriksa traksi pembeli
             t.next_rescan_at = time.time() + 35.0
             heapq.heappush(self.rescan_heap, (t.next_rescan_at, mint))
+            print(f"🐣 [PUMPFUN:NEW] Koin Terdeteksi: {t.name} (${t.symbol}) | CA: {mint[:6]}...{mint[-4:]} | Virtual SOL: {v_sol:.1f}")
 
         elif tx_type in ("buy", "sell"):
             t = self.tokens.get(mint)
@@ -1892,6 +1893,9 @@ class HitAndRunScanner:
                         pass
 
                 mints_discovered = list(dict.fromkeys(mints_discovered))
+                new_mints = [m for m in mints_discovered if m not in self.tokens]
+                if new_mints:
+                    print(f"🔍 [DEX:DISCOVERY] Terdeteksi {len(new_mints)} token baru dari DEX, memasukkan ke antrean audit...")
                 for mint in mints_discovered:
                     t = self.tokens.get(mint)
                     if not t:
@@ -1970,6 +1974,9 @@ class HitAndRunScanner:
                         pass
 
                 mints_discovered = list(dict.fromkeys(mints_discovered))
+                new_gecko = [m for m in mints_discovered if m not in self.tokens]
+                if new_gecko:
+                    print(f"🦎 [GECKO:DISCOVERY] Terdeteksi {len(new_gecko)} pool baru dari Raydium/PumpSwap/Meteora...")
                 for mint in mints_discovered:
                     t = self.tokens.get(mint)
                     if not t:
@@ -2284,6 +2291,14 @@ class HitAndRunScanner:
             )
             is_fatal = any(any(k in flag for k in fatal_keywords) for flag in red_flags)
 
+            # Cetak ringkasan exercise koin agar user dapat melihat di console
+            sym = t.symbol or "TOKEN"
+            mc_k = t.market_cap_usd / 1000.0 if t.market_cap_usd > 0 else 0.0
+            liq_k = t.liquidity_usd / 1000.0 if t.liquidity_usd > 0 else 0.0
+            status_text = "INKUBASI-RESCAN" if (not is_fatal and t.rescan_count < self.cfg.max_rescan_count) else "FILTER-TOLAK"
+            flags_str = ", ".join(red_flags[:2])
+            print(f"🔎 [EXERCISE] {sym} | MCap=${mc_k:.1f}k | Liq=${liq_k:.1f}k | Skor={score:.0f}/100 | {status_text} -> [{flags_str}]")
+
             # Jika koin aman dari scam permanen dan hanya dalam fase inkubasi (menunggu injeksi pool DEX/volume pembeli):
             if not is_fatal and t.rescan_count < self.cfg.max_rescan_count and age < self.cfg.max_rescan_age_sec:
                 t.rescan_count += 1
@@ -2324,7 +2339,7 @@ class HitAndRunScanner:
             )
             self.signals.append(signal_obj)
             await self.signal_queue.put(signal_obj)
-            print(f"🔥 [SIGNAL-{phase.upper()}] {t.name} (${t.symbol}) | Skor={score} | MCap=${t.market_cap_usd:,.0f} | Liq=${t.liquidity_usd:,.0f}")
+            print(f"🔥 [SIGNAL-{phase.upper()}] {t.name} (${t.symbol}) | Skor={score} | MCap=${t.market_cap_usd:,.0f} | Liq=${t.liquidity_usd:,.0f} | TELEGRAM SENT ✅")
             if self.cfg.telegram_enabled:
                 await self.telegram.send_signal_alert(signal_obj, t)
 
@@ -2352,8 +2367,24 @@ class HitAndRunScanner:
         print(f"⚡ [BUY-ENTRY] {signal_obj.symbol} | Size: ${size:.1f} | Entry: ${signal_obj.entry_price:.8f} | Stop: ${pos.stop_price:.8f}")
 
     async def monitor_loop(self):
+        last_heartbeat = 0.0
         while self.running:
             try:
+                now = time.time()
+                # Status heartbeat setiap 45 detik agar user dapat memantau aktivitas bot di console Render
+                if now - last_heartbeat >= 45.0:
+                    last_heartbeat = now
+                    tracked = len(self.tokens)
+                    eval_q = self.eval_queue.qsize()
+                    rescan_q = len(self.rescan_heap)
+                    signals_cnt = len(self.signals)
+                    active_pos = len(self.positions.positions)
+                    print(
+                        f"📊 [MONITOR-HEARTBEAT] Bot Aktif Memindai | "
+                        f"Token di Memori: {tracked} | Antrean Audit: {eval_q} | "
+                        f"Antrean Rescan: {rescan_q} | Sinyal Lolos: {signals_cnt} | Posisi: {active_pos}"
+                    )
+
                 for mint in list(self.positions.positions.keys()):
                     t = self.tokens.get(mint)
                     price = t.price if t else 0.0
