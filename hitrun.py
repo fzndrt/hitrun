@@ -2504,15 +2504,36 @@ class HealthServer:
         self._register_routes()
 
     def _keepalive_worker(self, port: int):
-        """Self-ping loop internal setiap 2.5 menit untuk mencegah idle/sleep di container Render."""
+        """Self-ping loop internal & eksternal untuk mencegah mode tidur (spin-down) di Render Free Tier."""
         time.sleep(15)
+        external_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+        if not external_url:
+            external_url = "https://memecoin-alert-bot-rbyx.onrender.com"
+
         while True:
             try:
-                time.sleep(150)
-                url = f"http://127.0.0.1:{port}/"
-                req = urllib.request.Request(url, headers={"User-Agent": "HitRunKeepalive/1.0"})
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    resp.read()
+                time.sleep(180)  # Setiap 3 menit
+                # 1. Ping lokal internal
+                try:
+                    url_local = f"http://127.0.0.1:{port}/"
+                    req_l = urllib.request.Request(url_local, headers={"User-Agent": "HitRunLocalKeepalive/1.0"})
+                    with urllib.request.urlopen(req_l, timeout=5) as resp:
+                        resp.read()
+                except Exception:
+                    pass
+
+                # 2. Ping eksternal via internet (Masuk lewat Render Load Balancer dengan GET agar router Render menganggap service aktif)
+                if external_url and external_url.startswith("http"):
+                    try:
+                        req_ext = urllib.request.Request(
+                            external_url,
+                            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"}
+                        )
+                        with urllib.request.urlopen(req_ext, timeout=10) as resp:
+                            if resp.status == 200:
+                                pass
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
