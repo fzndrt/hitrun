@@ -21,6 +21,7 @@ import urllib.request
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Set
+import functools
 import threading
 from flask import Flask, jsonify
 
@@ -48,7 +49,7 @@ class Config:
     # --- Momentum & Filter Harga (Masuk di Awal Pompa - Anti Pucuk / Anti Exhaustion) ---
     max_price_pump_5m_pct: float = 65.0         # Anti-Pucuk: Max +65% di 5m (jangan beli di wick hijau tertinggi!)
     min_price_pump_5m_pct: float = 1.5          # Titik Masuk: Wajib mulai naik minimal +1.5%
-    max_price_pump_1h_pct: float = 180.0        # Anti-Pucuk 1 Jam: Hindari koin yang sudah terbang 5x-10x
+    max_price_pump_1h_pct: float = 250.0        # Anti-Pucuk 1 Jam: Toleran hingga +250% (3.5x runner awal) sebelum ex-liquidity
     min_liquidity_to_mcap_ratio: float = 0.035  # Minimal rasio kolam vs MCap 3.5% (Anti Fake MCap)
     min_buy_volume_ratio: float = 0.60          # Wajib pembeli dominan kuat (>=60%)
 
@@ -1696,6 +1697,43 @@ class TelegramAlerter:
 # 10. SCANNER ENGINE UTAMA
 # ============================================================
 
+def log_ws_pool_event(source: str = "ws:pumpfun"):
+    """
+    Decorator for tracking incoming WebSocket and pool creation payloads.
+    Logs telemetry on new token / pool creation, migration events, payload size,
+    and extraction latency to ensure zero tokens slip by silently.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            msg = kwargs.get("msg") if "msg" in kwargs else (args[1] if len(args) > 1 else None)
+            start_t = time.perf_counter()
+            if isinstance(msg, dict):
+                tx_type = msg.get("txType")
+                mint = msg.get("mint", "unknown")
+                short_mint = f"{mint[:6]}...{mint[-4:]}" if len(mint) > 10 else mint
+                if tx_type == "create":
+                    sym = msg.get("symbol", "TOKEN")
+                    name = msg.get("name", "Unknown")
+                    v_sol = float(msg.get("vSolInBondingCurve", 0) or 0)
+                    trader = msg.get("traderPublicKey", "")
+                    short_trader = f"{trader[:4]}..{trader[-4:]}" if len(trader) > 8 else trader
+                    print(f"📡 [{source}:CREATE] Mint={short_mint} | {name} (${sym}) | InitSOL={v_sol:.1f} | Dev={short_trader}")
+                elif tx_type == "migrate":
+                    pool = msg.get("pool", "") or msg.get("poolAddress", "")
+                    short_pool = f"{pool[:6]}..{pool[-4:]}" if len(pool) > 10 else pool
+                    print(f"🚀 [{source}:MIGRATE] Mint={short_mint} -> Pool={short_pool} (Entering DEX Trading)")
+            
+            res = await func(*args, **kwargs)
+            
+            elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+            if isinstance(msg, dict) and msg.get("txType") == "create" and elapsed_ms > 50.0:
+                print(f"⏱️ [{source}:SLOW_INGEST] Ingestion took {elapsed_ms:.1f}ms for {msg.get('mint')}")
+            return res
+        return wrapper
+    return decorator
+
+
 class HitAndRunScanner:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -1734,6 +1772,7 @@ class HitAndRunScanner:
             except Exception as e:
                 await asyncio.sleep(4)
 
+    @log_ws_pool_event(source="ws:pumpfun")
     async def handle_pumpportal_msg(self, msg: dict):
         tx_type = msg.get("txType")
         mint = msg.get("mint")
