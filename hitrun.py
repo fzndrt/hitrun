@@ -1904,7 +1904,14 @@ class HitAndRunScanner:
                                     data = await resp.json()
                                     for p in (data.get("pairs", []) or [])[:self.cfg.discovery_max_per_query]:
                                         if p.get("chainId") == "solana":
+                                            dex_id = p.get("dexId", "")
                                             liq_usd = float(p.get("liquidity", {}).get("usd", 0) or 0)
+                                            # Dukungan Launchpad Bonding Curve non-Pump.fun (Meteora DBC / Moonshot / Jupiter Studio)
+                                            if liq_usd <= 0 and dex_id in ("meteoradbc", "moonshot", "jupiter"):
+                                                mcap_approx = float(p.get("marketCap", 0) or p.get("fdv", 0) or 0)
+                                                if mcap_approx >= 15000:
+                                                    liq_usd = max(liq_usd, mcap_approx * 0.15)
+
                                             buys_m5 = int(p.get("txns", {}).get("m5", {}).get("buys", 0) or 0)
                                             sells_m5 = int(p.get("txns", {}).get("m5", {}).get("sells", 0) or 0)
                                             buys_h1 = int(p.get("txns", {}).get("h1", {}).get("buys", 0) or 0)
@@ -1979,7 +1986,7 @@ class HitAndRunScanner:
             try:
                 mints_discovered: List[str] = []
 
-                # 1. GeckoTerminal Solana New, Trending & Multi-DEX Pools (PumpSwap, Pump.fun, Raydium, Meteora)
+                # 1. GeckoTerminal Solana New, Trending & Multi-DEX Pools (PumpSwap, Pump.fun, Raydium, Meteora, Meteora DBC)
                 urls = [
                     self.cfg.geckoterminal_new_pools_url,
                     self.cfg.geckoterminal_trending_pools_url,
@@ -1987,6 +1994,7 @@ class HitAndRunScanner:
                     "https://api.geckoterminal.com/api/v2/networks/solana/dexes/pump-fun/pools",
                     "https://api.geckoterminal.com/api/v2/networks/solana/dexes/raydium/pools",
                     "https://api.geckoterminal.com/api/v2/networks/solana/dexes/meteora/pools",
+                    "https://api.geckoterminal.com/api/v2/networks/solana/dexes/meteora-dbc/pools",
                 ]
                 for url in urls:
                     try:
@@ -2072,14 +2080,18 @@ class HitAndRunScanner:
 
         # 1. Ambil data pool DEX langsung
         pool_data = await self.rpc.get_pool_data(mint)
-        if pool_data and pool_data.get("liquidity_usd", 0) >= self.cfg.min_pool_liquidity_usd:
+        p_liq = float(pool_data.get("liquidity_usd", 0) or 0) if pool_data else 0.0
+        p_mcap = float(pool_data.get("market_cap", 0) or 0) if pool_data else 0.0
+        p_dex = str(pool_data.get("dex_id", "")) if pool_data else ""
+
+        if pool_data and (p_liq >= self.cfg.min_pool_liquidity_usd or (p_dex in ("meteoradbc", "moonshot") and p_mcap >= 15000)):
             t.is_migrated = True
-            t.dex_id = pool_data.get("dex_id", "dex")
+            t.dex_id = p_dex or "dex"
             t.name = pool_data.get("name", t.name or "Unknown")
             t.symbol = pool_data.get("symbol", t.symbol or "TOKEN")
             t.pool_address = pool_data.get("pool_address", "")
-            t.market_cap_usd = pool_data.get("market_cap", 0.0)
-            t.liquidity_usd = max(t.liquidity_usd, pool_data.get("liquidity_usd", 0.0))
+            t.market_cap_usd = p_mcap
+            t.liquidity_usd = max(t.liquidity_usd, p_liq if p_liq > 0 else (p_mcap * 0.15))
             t.price = pool_data.get("price", t.price)
             if pool_data.get("created_at", 0) > 0:
                 t.pool_age_minutes = max(0.1, (now - pool_data["created_at"]) / 60.0)
