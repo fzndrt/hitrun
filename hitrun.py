@@ -43,7 +43,7 @@ class Config:
     min_age_sec: int = 2
     enable_rescan: bool = True
     rescan_delay_sec: int = 20
-    max_rescan_count: int = 240                 # Mampu memantau token hingga 24 jam
+    max_rescan_count: int = 480                 # Mampu memantau token secara aktif hingga 24 jam penuh
     max_rescan_age_sec: int = 86400             # 24 jam max umur koin untuk menangkap 24h runners
 
     # --- Momentum & Filter Harga (Masuk di Awal Pompa - Anti Pucuk / Anti Exhaustion) ---
@@ -134,8 +134,8 @@ class Config:
     min_holder_growth_per_min: float = 0.5
     check_social_presence: bool = True
 
-    # --- Skor Minimum Masuk (HANYA GRADE-A SNIPER 100x RUNNER DNA) ---
-    min_conviction_score: float = 80.0          # Hanya sinyal dengan DNA Runner sejati (>= 80.0)
+    # --- Skor Minimum Masuk (GRADE-A RUNNER DNA & SOLID EARLY DISCOVERY >= 65.0) ---
+    min_conviction_score: float = 65.0          # Lolos sinyal Telegram mulai skor 65.0 dengan poin lengkap untuk DYOR
 
     # --- MANAJEMEN POSISI & EXIT PLAN (HIT AND RUN) ---
     position_size_pct: float = 3.0
@@ -1595,7 +1595,16 @@ class TelegramAlerter:
             await self.session.close()
 
     async def send_signal_alert(self, s: Signal, t: TokenState):
-        emoji = "🔥" if s.phase == "PRE_PARABOLIC_IGNITION" else ("🚀" if s.score >= 85 else "⚡")
+        if s.score >= 80:
+            emoji = "🔥"
+            grade_label = f"{s.score:.0f}/100 [GRADE-A RUNNER DNA] 🏆"
+        elif s.score >= 72:
+            emoji = "🚀"
+            grade_label = f"{s.score:.0f}/100 [GRADE-B+ SOLID BREAKOUT] 🚀"
+        else:
+            emoji = "⚡"
+            grade_label = f"{s.score:.0f}/100 [GRADE-B EARLY DISCOVERY / DYOR] ⚡"
+
         if s.phase == "PRE_PARABOLIC_IGNITION":
             phase_label = "🔥 EARLY IGNITION (PRE-PARABOLIC)"
         elif s.phase == "dex_pool":
@@ -1630,7 +1639,7 @@ class TelegramAlerter:
         tp2 = s.entry_price * 3.00  # +200% (3x)
         sl = s.entry_price * 0.78   # -22%
 
-        reasons_text = "\n".join(f"  • {r}" for r in s.reasons[:5])
+        reasons_text = "\n".join(f"  • {r}" for r in s.reasons[:6])
 
         text = (
             f"{emoji} <b>[HITRUN-V12] EARLY GEM SNIPER ALERT</b>\n"
@@ -1638,27 +1647,25 @@ class TelegramAlerter:
             f"🪙 <b>Token:</b> {t.name} (<b>${t.symbol}</b>)\n"
             f"🔑 <b>CA:</b> <code>{s.mint}</code> <i>(Salin Cepat)</i>\n"
             f"💎 <b>DEX / Status:</b> <code>{(t.dex_id or 'DEX').upper()}</code> · <b>{phase_label}</b>\n"
-            f"🎯 <b>Skor Keyakinan:</b> <code>{s.score}/100 [GRADE-A RUNNER DNA]</code>\n"
+            f"🎯 <b>Skor Keyakinan:</b> <code>{grade_label}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📊 <b>METRIK INFLEKSI HARGA:</b>\n"
             f"  • Entry Price: <code>${s.entry_price:.8f}</code>\n"
             f"  • Market Cap: <code>${s.market_cap:,.0f}</code> <i>(Early Zone &lt; $600K)</i>\n"
             f"  • Likuiditas Pool: <code>${s.liquidity:,.0f}</code> <i>(Rasio: {liq_ratio:.1f}%)</i>\n"
-            f"  • Usia Koin / Pool: <code>{age_str}</code>\n"
+            f"  • Usia Koin / Pool: <code>{age_str} (Pantauan 0-24 Jam)</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👥 <b>ANALISIS PASUKAN PEMBELI (BUYER ARMY):</b>\n"
-            f"  • Rasio Pembeli (Buy Ratio): <code>{buy_ratio:.1f}% BUY ({buy_mult:.2f}x Penjual)</code>\n"
-            f"  • Pembeli Unik (Unique Buyers): <code>{unique_buyers} Dompet Berbeda</code>\n"
-            f"  • Total Pemegang (Holders): <code>{len(t.holders)} Dompet On-Chain</code>\n"
-            f"  • Pemegang Terbesar (Top 1 Non-Pool): <code>{top1_pct:.2f}% (Toleransi &le; 10%)</code>\n"
-            f"  • Konsentrasi Top 10: <code>{top10_pct:.1f}% (Terdistribusi Sehat)</code>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🛡️ <b>FORENSIK DEVELOPER & CABAL:</b>\n"
-            f"  • Status Developer: <code>{dev_status}</code>\n"
-            f"  • Dompet Pecahan Dev (Sybil Tree): <code>{sybil_status}</code>\n"
-            f"  • Status Kontrak: <code>Mint: {'Revoked ✅' if not t.mint_authority_active else 'Aktif ❌'} | Freeze: {'Revoked ✅' if not t.freeze_authority_active else 'Aktif ❌'}</code>\n"
-            f"  • Skor Risiko RugCheck: <code>{t.rug_score:.0f}/100 (Aman)</code>\n"
-            f"  • Kualitas Volume: <code>{'✅ Organik Murni' if not t.is_wash_trading else '⚠️ Fake Volume'}</code>\n"
+            f"📋 <b>BREAKDOWN POIN &amp; DYOR CHECKLIST:</b>\n"
+            f"  • 🎯 Skor Total: <code>{s.score:.0f}/100</code> (Ambang Batas Lolos: &ge; 65)\n"
+            f"  • 🛡️ Risiko RugCheck: <code>{t.rug_score:.0f}/100</code> ({'Aman Rendah Risiko ✅' if t.rug_score <= 25 else 'Waspada ⚠️'})\n"
+            f"  • 👥 Pasukan Pembeli: <code>{buy_ratio:.1f}% BUY ({buy_mult:.2f}x Penjual)</code>\n"
+            f"  • 👤 Pembeli Unik: <code>{unique_buyers} Dompet</code> | Organik: <code>{t.organic_buys_count}</code>\n"
+            f"  • 🐋 Top 1 Non-Pool: <code>{top1_pct:.2f}%</code> ({'Terdistribusi Sehat ✅' if top1_pct <= 7.0 else 'Terpantau ⚠️'})\n"
+            f"  • 📦 Top 10 Akumulasi: <code>{top10_pct:.1f}%</code> (Batas Max 33%)\n"
+            f"  • 🧑‍💻 Status Developer: <code>{dev_status}</code>\n"
+            f"  • 🕸️ Dompet Terkait Dev: <code>{sybil_status}</code>\n"
+            f"  • 🔒 Otoritas Kontrak: <code>Mint: {'Revoked ✅' if not t.mint_authority_active else 'Aktif ❌'} | Freeze: {'Revoked ✅' if not t.freeze_authority_active else 'Aktif ❌'}</code>\n"
+            f"  • 💧 Simulasi Jual (Honeypot): <code>{'Sukses (Bisa Dijual) ✅' if t.sell_simulation_ok else 'Gagal ❌'}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📈 <b>PREDIKSI TARGET PROFIT (HIT &amp; RUN):</b>\n"
             f"  • 🎯 TP 1 (+80%): <code>${tp1:.8f}</code> <i>(Tarik Modal 50% - Free Ride)</i>\n"
@@ -1666,12 +1673,13 @@ class TelegramAlerter:
             f"  • 🛡️ Trailing Stop: <code>-18% dari High</code> (Kawal Moonbag)\n"
             f"  • 🛑 Stop Loss: <code>-22% Ketat</code> (Anti Nyangkut)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"💡 <b>Katalog Keunggulan On-Chain:</b>\n"
+            f"💡 <b>KATALOG KATALIS ON-CHAIN:</b>\n"
             f"{reasons_text}\n\n"
-            f"⚡ <b>LINK EKSEKUSI TRADING CEPAT:</b>\n"
+            f"⚡ <b>LINK EKSEKUSI &amp; AUDIT CEPAT:</b>\n"
             f"🔗 <a href='https://photon-sol.tinyastro.io/en/r/@alpha/{s.mint}'>[Photon SOL]</a> · "
             f"<a href='https://bullx.io/terminal?chainId=1399811149&address={s.mint}'>[BullX]</a> · "
             f"<a href='https://dexscreener.com/solana/{s.mint}'>[DexScreener]</a> · "
+            f"<a href='https://rugcheck.xyz/tokens/{s.mint}'>[RugCheck]</a> · "
             f"<a href='https://gmgn.ai/sol/token/{s.mint}'>[GMGN]</a>"
         )
         await self._send(text)
@@ -1840,18 +1848,19 @@ class HitAndRunScanner:
                 t.liquidity_usd = max(t.liquidity_usd, v_sol * 160.0)
 
             # Evaluasi SEGERA dipicu saat volume organik murni mulai masuk (Pre-Parabolic Trigger)!
-            if not t.scored and not t.signal_emitted:
+            if not t.signal_emitted:
                 has_organic_early = (
                     t.organic_buys_count >= self.cfg.min_organic_secondary_buyers and
                     t.organic_volume_buys_sol >= self.cfg.min_organic_inflow_sol
                 )
                 has_bonding_threshold = (t.bonding_pct >= self.cfg.min_bonding_pct and len(t.unique_buyers) >= 3)
                 if has_organic_early or has_bonding_threshold:
+                    t.scored = False
                     await self.eval_queue.put(mint)
 
         elif tx_type == "migrate":
             t = self.tokens.get(mint)
-            if t:
+            if t and not t.signal_emitted:
                 t.is_migrated = True
                 t.pool_address = msg.get("pool", "") or msg.get("poolAddress", "")
                 t.scored = False
@@ -1945,7 +1954,9 @@ class HitAndRunScanner:
                             created_at=time.time(),
                         )
                         await self.eval_queue.put(mint)
-                    elif not t.signal_emitted and not t.scored:
+                    elif not t.signal_emitted:
+                        # Koin runner 0-24 jam yang kembali aktif di DEX: selalu berikan peluang ke-2, ke-3, dst
+                        t.scored = False
                         await self.eval_queue.put(mint)
 
             except Exception:
@@ -2026,7 +2037,9 @@ class HitAndRunScanner:
                             created_at=time.time(),
                         )
                         await self.eval_queue.put(mint)
-                    elif not t.signal_emitted and not t.scored:
+                    elif not t.signal_emitted:
+                        # Koin runner 0-24 jam yang kembali aktif di Raydium/Meteora: selalu berikan peluang berikutnya
+                        t.scored = False
                         await self.eval_queue.put(mint)
 
             except Exception:
@@ -2048,8 +2061,11 @@ class HitAndRunScanner:
 
     async def evaluate_token(self, mint: str):
         t = self.tokens.get(mint)
-        if not t or t.scored:
+        if not t or t.signal_emitted:
             return
+        if getattr(t, "is_evaluating", False):
+            return
+        t.is_evaluating = True
 
         now = time.time()
         age = now - t.created_at
@@ -2256,9 +2272,11 @@ class HitAndRunScanner:
             red_flags.append(f"dev_dumped:{t.dev_sold_pct:.1f}%")
         if t.dev_holding_pct > self.cfg.max_dev_holding_pct:
             red_flags.append(f"dev_holding_high:{t.dev_holding_pct:.1f}%")
-        if top1_pct > self.cfg.max_top1_holder_pct:
+        # Toleransi awal: Untuk koin baru lahir (< 20 holder & belum migrasi), toleransi top 1 hingga 14% sebelum terdilusi
+        allowed_top1 = 14.0 if (len(individual_holders) < 20 and not t.is_migrated) else self.cfg.max_top1_holder_pct
+        if top1_pct > allowed_top1:
             red_flags.append(f"top1_whale:{top1_pct:.1f}%")
-        if top10_pct > self.cfg.max_top10_holder_pct:
+        if top10_pct > self.cfg.max_top10_holder_pct and len(individual_holders) >= 15:
             red_flags.append(f"top10_high:{top10_pct:.1f}%")
 
         if t.is_migrated and self.cfg.require_lp_locked and not locked:
@@ -2318,50 +2336,31 @@ class HitAndRunScanner:
             score = max(score, org_score)
             reasons.extend(org_reasons)
 
-        t.scored = True
+        # Filter scam murni permanen (tidak pernah bisa diperbaiki on-chain):
+        unrecoverable_scam_keywords = (
+            "mint_authority_active", "freeze_authority_active", "honeypot",
+            "transfer_tax_high", "creator_rugpull_history"
+        )
+        is_fatal = any(any(k in flag for k in unrecoverable_scam_keywords) for flag in red_flags)
 
-        # Keputusan: Re-scan jika koin potensial sedang mengonfirmasi likuiditas atau menunggu pool DLMM
-        if red_flags:
-            # Periksa apakah ada bendera merah fatal yang tidak bisa diperbaiki (scam/rug permanen)
-            fatal_keywords = (
-                "mint_authority_active", "freeze_authority_active", "honeypot",
-                "transfer_tax_high", "creator_rugpull_history", "dev_dumped",
-                "cabal_sybil", "top1_whale", "top10_high"
-            )
-            is_fatal = any(any(k in flag for k in fatal_keywords) for flag in red_flags)
+        sym = t.symbol or "TOKEN"
+        mc_k = t.market_cap_usd / 1000.0 if t.market_cap_usd > 0 else 0.0
+        liq_k = t.liquidity_usd / 1000.0 if t.liquidity_usd > 0 else 0.0
 
-            # Cetak ringkasan exercise koin agar user dapat melihat di console
-            sym = t.symbol or "TOKEN"
-            mc_k = t.market_cap_usd / 1000.0 if t.market_cap_usd > 0 else 0.0
-            liq_k = t.liquidity_usd / 1000.0 if t.liquidity_usd > 0 else 0.0
-            status_text = "INKUBASI-RESCAN" if (not is_fatal and t.rescan_count < self.cfg.max_rescan_count) else "FILTER-TOLAK"
+        if is_fatal:
             flags_str = ", ".join(red_flags[:2])
-            print(f"🔎 [EXERCISE] {sym} | MCap=${mc_k:.1f}k | Liq=${liq_k:.1f}k | Skor={score:.0f}/100 | {status_text} -> [{flags_str}]")
-
-            # Jika koin aman dari scam permanen dan hanya dalam fase inkubasi (menunggu injeksi pool DEX/volume pembeli):
-            if not is_fatal and t.rescan_count < self.cfg.max_rescan_count and age < self.cfg.max_rescan_age_sec:
-                t.rescan_count += 1
-                t.scored = False
-                # Smart multi-stage delay:
-                # 0-3 menit: 20 detik (menangkap lepas landas Pump.fun)
-                # 3-15 menit: 45 detik (menangkap pembentukan pool Raydium/Meteora)
-                # 15-60 menit: 90 detik (menangkap koin 1 jam yang sedang konsolidasi)
-                # 1-12 jam: 180 detik (menangkap breakout multi-hour runner gelombang 2 & 3)
-                if age < 180:
-                    delay = 20.0
-                elif age < 900:
-                    delay = 45.0
-                elif age < 3600:
-                    delay = 90.0
-                else:
-                    delay = 180.0
-                t.next_rescan_at = now + delay
-                heapq.heappush(self.rescan_heap, (t.next_rescan_at, mint))
+            print(f"🛑 [FATAL-SCAM] {sym} | Ditolak Permanen -> [{flags_str}]")
+            t.scored = True
+            t.is_evaluating = False
             return
 
-        # LOLOS!
-        if score >= self.cfg.min_conviction_score and not t.signal_emitted:
+        # ========================================================
+        # 1. LOLOS SINYAL TELEGRAM (Skor >= 65 & Tanpa Red Flags Kritis)
+        # ========================================================
+        if not red_flags and score >= self.cfg.min_conviction_score and not t.signal_emitted:
             t.signal_emitted = True
+            t.scored = True
+            t.is_evaluating = False
             signal_obj = Signal(
                 mint=mint,
                 name=t.name or "Token",
@@ -2378,9 +2377,44 @@ class HitAndRunScanner:
             )
             self.signals.append(signal_obj)
             await self.signal_queue.put(signal_obj)
-            print(f"🔥 [SIGNAL-{phase.upper()}] {t.name} (${t.symbol}) | Skor={score} | MCap=${t.market_cap_usd:,.0f} | Liq=${t.liquidity_usd:,.0f} | TELEGRAM SENT ✅")
+            print(f"🔥 [SIGNAL-{phase.upper()}] {t.name} (${t.symbol}) | Skor={score:.0f} | MCap=${t.market_cap_usd:,.0f} | Liq=${t.liquidity_usd:,.0f} | TELEGRAM SENT ✅")
             if self.cfg.telegram_enabled:
                 await self.telegram.send_signal_alert(signal_obj, t)
+            return
+
+        # ========================================================
+        # 2. PELUANG KE-2, KE-3, DST (INKUBASI & LIMBO RESCAN 0 - 24 JAM)
+        # ========================================================
+        # Jika koin aman dari scam permanen tapi skor belum 65 atau masih dalam inkubasi,
+        # sistem SELALU menjadwalkan rescan selama umur koin < 24 jam (86.400 detik)!
+        if not is_fatal and t.rescan_count < self.cfg.max_rescan_count and age < self.cfg.max_rescan_age_sec and not t.signal_emitted:
+            t.rescan_count += 1
+            t.scored = False
+            t.is_evaluating = False
+
+            # Smart multi-stage delay:
+            # 0-3 menit: 20 detik (menangkap lepas landas Pump.fun)
+            # 3-15 menit: 40 detik (menangkap pembentukan pool Raydium/Meteora/PumpSwap)
+            # 15-60 menit: 75 detik (menangkap koin 1 jam yang sedang konsolidasi)
+            # 1-24 jam: 150 detik (menangkap breakout multi-hour runner 24 jam)
+            if age < 180:
+                delay = 20.0
+            elif age < 900:
+                delay = 40.0
+            elif age < 3600:
+                delay = 75.0
+            else:
+                delay = 150.0
+
+            t.next_rescan_at = now + delay
+            heapq.heappush(self.rescan_heap, (t.next_rescan_at, mint))
+
+            status_note = f"Skor {score:.0f} < {self.cfg.min_conviction_score:.0f} (Menunggu Traksi)" if not red_flags else (", ".join(red_flags[:2]))
+            print(f"🔄 [INKUBASI-RESCAN #{t.rescan_count}] {sym} | MCap=${mc_k:.1f}k | Liq=${liq_k:.1f}k | Skor={score:.0f}/100 | Rescan dlm {delay:.0f}s [{status_note}]")
+            return
+
+        t.scored = True
+        t.is_evaluating = False
 
     async def _zero(self):
         return 0.0
