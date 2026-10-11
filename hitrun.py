@@ -24,6 +24,12 @@ from typing import Dict, List, Optional, Tuple, Set
 import functools
 import threading
 from flask import Flask, jsonify
+# --- TAMBAHKAN KODE INI ---
+KNOWN_SMART_WALLETS = set([
+    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1", # Isi dengan address asli jika ada, ini hanya contoh agar tidak error
+])
+# --------------------------
+
 
 # Pastikan seluruh log print langsung muncul seketika di Render (unbuffered)
 _builtin_print = print
@@ -1762,7 +1768,7 @@ class TelegramAlerter:
             f"  • 🌕 Moon Target (+1.000% / 11x): <code>${tp_moon:.8f}</code> <i>(Sisa 25% Moonbag Kawal Trailing)</i>",
             "  • 🛡️ Trailing Stop: <code>-18% s/d -25% dari Puncak</code> (Kawal Moonbag)",
             "  • 🛑 Cut Loss Ketat: <code>-22%</code> (Jika Dev Dump / Trap)",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             "💡 <b>KATALOG KATALIS ON-CHAIN:</b>",
             reasons_text,
             "",
@@ -1774,8 +1780,9 @@ class TelegramAlerter:
             f"<a href='https://gmgn.ai/sol/token/{s.mint}'>[GMGN]</a>",
         ])
 
-                text = "\n".join(msg_parts)
+        text = "\n".join(msg_parts)
         await self._send(text)
+
 
     async def _send(self, text: str):
         if not self.session or not self.bot_token or not self.chat_id:
