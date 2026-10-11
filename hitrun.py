@@ -698,7 +698,11 @@ class RpcClient:
             self.cache.set(f"pool:{mint}", {})
             return {}
 
-        best = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+        # Filter pool di mana token ini bertindak sebagai baseToken (bukan quote token dari koin lain)
+        base_pairs = [p for p in pairs if p.get("baseToken", {}).get("address") == mint]
+        if not base_pairs:
+            base_pairs = pairs
+        best = max(base_pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
 
         base_token = best.get("baseToken", {}) or {}
         txns = best.get("txns", {}) or {}
@@ -1855,8 +1859,11 @@ class HitAndRunScanner:
         while self.running:
             try:
                 async with websockets.connect(self.cfg.pumpportal_ws, ping_interval=20, ping_timeout=20) as ws:
+                    self._ws = ws
                     await ws.send(json.dumps({"method": "subscribeNewToken"}))
                     await ws.send(json.dumps({"method": "subscribeMigration"}))
+                    # Langganan trade agregat Pump.fun untuk menangkap infleksi pembelian koin baru
+                    await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": []}))
                     print("[ws:pumpfun] connected to pumpportal")
                     async for raw in ws:
                         if not self.running:
@@ -1895,9 +1902,15 @@ class HitAndRunScanner:
             )
             t.sol_in_bonding_history.append((time.time(), v_sol))
             self.tokens[mint] = t
-            # Jadwalkan rescan otomatis awal (T+35 detik) untuk memeriksa traksi pembeli
-            t.next_rescan_at = time.time() + 35.0
+            # Jadwalkan rescan otomatis awal (T+30 detik) untuk memeriksa traksi pembeli
+            t.next_rescan_at = time.time() + 30.0
             heapq.heappush(self.rescan_heap, (t.next_rescan_at, mint))
+            # Daftarkan mint ke stream trade websocket agar setiap order beli masuk real-time
+            try:
+                if hasattr(self, "_ws") and self._ws:
+                    asyncio.create_task(self._ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [mint]})))
+            except Exception:
+                pass
             print(f"🐣 [PUMPFUN:NEW] Koin Terdeteksi: {t.name} (${t.symbol}) | CA: {mint[:6]}...{mint[-4:]} | Virtual SOL: {v_sol:.1f}")
 
         elif tx_type in ("buy", "sell"):
