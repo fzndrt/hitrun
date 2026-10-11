@@ -1774,10 +1774,10 @@ class TelegramAlerter:
             f"<a href='https://gmgn.ai/sol/token/{s.mint}'>[GMGN]</a>",
         ])
 
-        text = "\n".join(msg_parts)
+                text = "\n".join(msg_parts)
         await self._send(text)
 
-async def _send(self, text: str):
+    async def _send(self, text: str):
         if not self.session or not self.bot_token or not self.chat_id:
             return
         url = f"{self.base_url}/sendMessage"
